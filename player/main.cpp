@@ -1,4 +1,4 @@
-// player_main.cpp
+// main.cpp
 // 依赖：Qt6, FFmpeg, D3D11Renderer.h, ControlClient.h, Recorder.h
 
 extern "C" {
@@ -25,6 +25,7 @@ extern "C" {
 #include <QTimer>
 #include <QMetaType>
 #include <QString>
+#include <QStyle>
 
 #include <windows.h>
 
@@ -721,7 +722,7 @@ static std::string extract_host_from_srt_url(const std::string& url) {
 // main
 // ============================================================
 
-#include "player_main.moc"   // 让 qmake/cmake-automoc 处理 Q_OBJECT
+#include "main.moc"   // 让 qmake/cmake-automoc 处理 Q_OBJECT
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
@@ -907,3 +908,4 @@ int main(int argc, char* argv[]) {
     player.stop();
     return code;
 }
+
