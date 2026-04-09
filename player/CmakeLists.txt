@@ -1,0 +1,50 @@
+cmake_minimum_required(VERSION 3.21)
+project(srt_player LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
+
+find_package(Qt6 COMPONENTS Widgets Multimedia REQUIRED)
+
+set(FFMPEG_ROOT "D:/vcpkg/installed/x64-windows")
+set(FFMPEG_INCLUDE_DIR "${FFMPEG_ROOT}/include")
+set(FFMPEG_LIB_DIR "${FFMPEG_ROOT}/lib")
+
+add_executable(srt_player
+    main.cpp
+    D3D11Renderer.cpp
+    ControlClient.cpp
+    Recorder.cpp
+)
+
+target_include_directories(srt_player PRIVATE
+    ${FFMPEG_INCLUDE_DIR}
+)
+
+target_link_directories(srt_player PRIVATE
+    ${FFMPEG_LIB_DIR}
+)
+
+target_link_libraries(srt_player PRIVATE
+    Qt6::Widgets
+    Qt6::Multimedia
+    d3d11
+    dxgi
+    ws2_32
+    avcodec
+    avformat
+    avutil
+    swscale
+    swresample
+    "${FFMPEG_LIB_DIR}/swresample.lib"
+)
+
+target_compile_definitions(srt_player PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    _CRT_SECURE_NO_WARNINGS
+)

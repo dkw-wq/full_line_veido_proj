@@ -1,0 +1,3 @@
+C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/build/CMakeFiles/srt_player.dir
+C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/build/CMakeFiles/ZERO_CHECK.dir

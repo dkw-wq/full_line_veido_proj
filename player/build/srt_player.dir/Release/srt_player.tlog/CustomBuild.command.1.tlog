@@ -1,0 +1,10 @@
+^C:\USERS\DKW\.A_DKWRTC\FULL_LINE_VEIDO_PROJ\PLAYER\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player -BC:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/build --check-stamp-file C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
