@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SRT 中继监控</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg0: #f7f6f2;
+    --bg1: #ffffff;
+    --bg2: #f1efe8;
+    --border: rgba(60,58,50,.12);
+    --border2: rgba(60,58,50,.22);
+    --text1: #1a1a18;
+    --text2: #5f5e5a;
+    --text3: #888780;
+    --green:  #1d9e75;
+    --green-bg: #e1f5ee;
+    --green-text: #085041;
+    --red:    #e24b4a;
+    --red-bg: #fcebeb;
+    --red-text: #791f1f;
+    --blue:   #378add;
+    --blue-bg: #e6f1fb;
+    --blue-text: #0c447c;
+    --amber:  #ef9f27;
+    --amber-bg: #faeeda;
+    --amber-text: #633806;
+    --r-md: 8px;
+    --r-lg: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg0: #1a1a18;
+      --bg1: #242422;
+      --bg2: #2c2c2a;
+      --border: rgba(210,205,190,.1);
+      --border2: rgba(210,205,190,.2);
+      --text1: #e8e6df;
+      --text2: #b4b2a9;
+      --text3: #888780;
+      --green-bg: #04342c;
+      --green-text: #9fe1cb;
+      --red-bg: #501313;
+      --red-text: #f09595;
+      --blue-bg: #042c53;
+      --blue-text: #b5d4f4;
+      --amber-bg: #412402;
+      --amber-text: #fac775;
+    }
+  }
+
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg0);
+    color: var(--text1);
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 20px;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .toolbar input[type=text] {
+    flex: 1;
+    min-width: 200px;
+    max-width: 340px;
+    height: 34px;
+    padding: 0 10px;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--r-md);
+    background: var(--bg1);
+    color: var(--text1);
+    font-size: 13px;
+    outline: none;
+  }
+  .toolbar input[type=text]:focus { border-color: var(--blue); }
+  button {
+    height: 34px;
+    padding: 0 14px;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--r-md);
+    background: var(--bg1);
+    color: var(--text1);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button:hover { background: var(--bg2); }
+  button:active { transform: scale(0.98); }
+  button.primary { border-color: var(--blue); color: var(--blue-text); background: var(--blue-bg); }
+  button.danger  { border-color: var(--red);  color: var(--red-text);  background: var(--red-bg); }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .badge-green  { background: var(--green-bg);  color: var(--green-text); }
+  .badge-red    { background: var(--red-bg);    color: var(--red-text); }
+  .badge-gray   { background: var(--bg2);       color: var(--text2); }
+  .badge-blue   { background: var(--blue-bg);   color: var(--blue-text); }
+  .badge-amber  { background: var(--amber-bg);  color: var(--amber-text); }
+
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 16px;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text3);
+  }
+  .dot.on  { background: var(--green); }
+  .dot.err { background: var(--red); }
+
+  .grid-4 {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  @media (max-width: 720px) { .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+  .metric-card {
+    background: var(--bg2);
+    border-radius: var(--r-md);
+    padding: 12px 14px;
+  }
+  .metric-card .label {
+    font-size: 11px;
+    color: var(--text3);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .metric-card .value {
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--text1);
+    line-height: 1.2;
+  }
+  .metric-card .unit {
+    font-size: 12px;
+    color: var(--text2);
+    margin-left: 3px;
+  }
+
+  .card {
+    background: var(--bg1);
+    border: 0.5px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: 14px 16px;
+    margin-bottom: 14px;
+  }
+  .card-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 12px;
+  }
+
+  .chart-wrap {
+    position: relative;
+    width: 100%;
+    height: 160px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text3);
+    padding: 0 8px 8px 0;
+    border-bottom: 0.5px solid var(--border);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  td {
+    padding: 7px 8px 7px 0;
+    border-bottom: 0.5px solid var(--border);
+    color: var(--text1);
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  .muted { color: var(--text3); }
+
+  #no-subs {
+    padding: 16px 0;
+    color: var(--text3);
+    font-size: 13px;
+  }
+
+  #event-log {
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--text2);
+    max-height: 120px;
+    overflow-y: auto;
+    line-height: 1.8;
+  }
+  #event-log .ev-line { }
+  #event-log .ev-ok   { color: var(--green); }
+  #event-log .ev-err  { color: var(--red); }
+  #event-log .ev-warn { color: var(--amber); }
+
+  .legend {
+    display: flex;
+    gap: 14px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: var(--text2);
+  }
+  .legend-dot {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <input type="text" id="ws-url" value="ws://10.160.196.17:8765" placeholder="ws://SERVER:8765">
+  <button class="primary" id="btn-connect">连接</button>
+  <button id="btn-disconnect" style="display:none">断开</button>
+</div>
+
+<div class="status-bar">
+  <span class="dot" id="ws-dot"></span>
+  <span id="ws-status">未连接</span>
+  <span style="margin-left:8px;color:var(--text3)" id="last-update"></span>
+</div>
+
+<div class="grid-4">
+  <div class="metric-card">
+    <div class="label">推流端</div>
+    <div class="value" id="m-pub"><span class="badge badge-gray">离线</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">拉流端数</div>
+    <div class="value" id="m-subs">—</div>
+  </div>
+  <div class="metric-card">
+    <div class="label">入流带宽</div>
+    <div class="value" id="m-in">—<span class="unit">Mbps</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">出流带宽</div>
+    <div class="value" id="m-out">—<span class="unit">Mbps</span></div>
+  </div>
+</div>
+
+<div class="grid-4" style="margin-bottom:16px">
+  <div class="metric-card">
+    <div class="label">总接收</div>
+    <div class="value" id="m-tin">—<span class="unit">MB</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">总发送</div>
+    <div class="value" id="m-tout">—<span class="unit">MB</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">TS 不连续</div>
+    <div class="value" id="m-disc" style="color:var(--amber)">—</div>
+  </div>
+  <div class="metric-card">
+    <div class="label">队列丢包</div>
+    <div class="value" id="m-drops" style="color:var(--red)">—</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="legend">
+    <span><span class="legend-dot" style="background:#378add"></span>入流 Mbps</span>
+    <span><span class="legend-dot" style="background:#1d9e75"></span>出流 Mbps</span>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="bw-chart"
+      role="img"
+      aria-label="实时带宽折线图,显示入流和出流带宽趋势(Mbps)">
+      实时带宽趋势数据
+    </canvas>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">拉流端列表</div>
+  <div id="sub-table-wrap">
+    <div id="no-subs">暂无拉流端</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">事件日志</div>
+  <div id="event-log"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const MAX_HIST = 60;
+
+let ws = null;
+let chart = null;
+
+const $ = id => document.getElementById(id);
+
+function fmt(n, dec=2) {
+  if (n == null || isNaN(n)) return '—';
+  return Number(n).toFixed(dec);
+}
+
+function fmtMs(ms) {
+  if (ms < 0) return '—';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
+function addLog(msg, cls='') {
+  const log = $('event-log');
+  const line = document.createElement('div');
+  line.className = 'ev-line' + (cls ? ' ' + cls : '');
+  const now = new Date().toLocaleTimeString();
+  line.textContent = `[${now}] ${msg}`;
+  log.prepend(line);
+  while (log.children.length > 80) log.removeChild(log.lastChild);
+}
+
+function initChart() {
+  const ctx = $('bw-chart').getContext('2d');
+  const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const gridColor = isDark ? 'rgba(210,205,190,0.06)' : 'rgba(60,58,50,0.06)';
+  const tickColor = isDark ? '#888780' : '#888780';
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: Array(MAX_HIST).fill(''),
+      datasets: [
+        {
+          label: '入流 Mbps',
+          data: Array(MAX_HIST).fill(null),
+          borderColor: '#378add',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.3,
+          borderDash: [],
+        },
+        {
+          label: '出流 Mbps',
+          data: Array(MAX_HIST).fill(null),
+          borderColor: '#1d9e75',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.3,
+          borderDash: [4, 3],
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          mode: 'index',
+          intersect: false,
+          callbacks: {
+            label: ctx => ctx.dataset.label + ': ' + fmt(ctx.parsed.y) + ' Mbps'
+          }
+        }
+      },
+      scales: {
+        x: {
+          display: false,
+        },
+        y: {
+          beginAtZero: true,
+          grid: { color: gridColor, lineWidth: 0.5 },
+          ticks: {
+            color: tickColor,
+            font: { size: 11 },
+            maxTicksLimit: 5,
+            callback: v => fmt(v, 1)
+          },
+          border: { display: false }
+        }
+      }
+    }
+  });
+}
+
+function updateChart(inHist, outHist) {
+  if (!chart) return;
+  const len = Math.max(inHist.length, outHist.length, 1);
+  const pad = n => Array(Math.max(0, MAX_HIST - n)).fill(null);
+
+  chart.data.datasets[0].data = [...pad(inHist.length), ...inHist];
+  chart.data.datasets[1].data = [...pad(outHist.length), ...outHist];
+  chart.update('none');
+}
+
+function renderSubs(list) {
+  const wrap = $('sub-table-wrap');
+  if (!list || list.length === 0) {
+    wrap.innerHTML = '<div id="no-subs">暂无拉流端</div>';
+    return;
+  }
+  let html = '<table><thead><tr>'
+    + '<th>ID</th><th>地址</th><th>已发送</th><th>延迟</th><th>队列深度</th><th>空闲</th>'
+    + '</tr></thead><tbody>';
+  for (const s of list) {
+    const idle = s.idle_ms;
+    const idleCls = idle > 3000 ? 'badge badge-amber' : 'badge badge-green';
+    html += `<tr>
+      <td class="mono muted">#${s.id}</td>
+      <td class="mono">${s.peer}</td>
+      <td>${fmt(s.sent_mb, 1)} MB</td>
+      <td><span class="badge badge-blue">${s.latency_ms < 0 ? '?' : s.latency_ms} ms</span></td>
+      <td>${s.q}</td>
+      <td><span class="${idleCls}">${fmtMs(idle)}</span></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+function handleMsg(data) {
+  let d;
+  try { d = JSON.parse(data); } catch { return; }
+
+  $('last-update').textContent = '更新于 ' + (d.wall_time || '');
+
+  // 推流端状态
+  const pubEl = $('m-pub');
+  if (d.pub_online) {
+    pubEl.innerHTML = '<span class="badge badge-green">在线</span>';
+  } else {
+    pubEl.innerHTML = '<span class="badge badge-red">离线</span>';
+  }
+
+  $('m-subs').textContent = d.subscribers ?? '—';
+  $('m-in').innerHTML  = fmt(d.ingress_mbps) + '<span class="unit">Mbps</span>';
+  $('m-out').innerHTML = fmt(d.egress_mbps)  + '<span class="unit">Mbps</span>';
+  $('m-tin').innerHTML  = fmt(d.total_ingress_mb, 1) + '<span class="unit">MB</span>';
+  $('m-tout').innerHTML = fmt(d.total_egress_mb,  1) + '<span class="unit">MB</span>';
+
+  const discEl = $('m-disc');
+  discEl.textContent = d.ts_disc ?? '—';
+  discEl.style.color = (d.ts_disc > 0) ? 'var(--amber)' : 'var(--green)';
+
+  const dropEl = $('m-drops');
+  dropEl.textContent = d.queue_drops ?? '—';
+  dropEl.style.color = (d.queue_drops > 0) ? 'var(--red)' : 'var(--green)';
+
+  updateChart(d.ingress_hist || [], d.egress_hist || []);
+  renderSubs(d.sub_list || []);
+}
+
+function connect() {
+  const url = $('ws-url').value.trim();
+  if (!url) return;
+  addLog('正在连接 ' + url + ' ...', 'ev-warn');
+  ws = new WebSocket(url);
+  ws.onopen = () => {
+    $('ws-dot').className = 'dot on';
+    $('ws-status').textContent = '已连接';
+    $('btn-connect').style.display = 'none';
+    $('btn-disconnect').style.display = '';
+    addLog('WebSocket 已连接', 'ev-ok');
+  };
+  ws.onmessage = e => handleMsg(e.data);
+  ws.onerror = () => addLog('连接错误', 'ev-err');
+  ws.onclose = e => {
+    $('ws-dot').className = 'dot err';
+    $('ws-status').textContent = '已断开';
+    $('btn-connect').style.display = '';
+    $('btn-disconnect').style.display = 'none';
+    addLog('连接关闭 code=' + e.code, 'ev-err');
+    ws = null;
+  };
+}
+
+function disconnect() {
+  if (ws) { ws.close(); ws = null; }
+}
+
+$('btn-connect').onclick    = connect;
+$('btn-disconnect').onclick = disconnect;
+$('ws-url').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+
+initChart();
+addLog('面板已加载，请填入 WebSocket 地址后点击连接', 'ev-warn');
+</script>
+</body>
+</html>

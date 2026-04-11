@@ -14,7 +14,6 @@ C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/main.cpp
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/QMetaType
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/QObject
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/QString
- mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/QTimer
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/q17memory.h
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/q20functional.h
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/q20iterator.h
@@ -136,7 +135,6 @@ C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/main.cpp
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/qtenvironmentvariables.h
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/qtextstream.h
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/qtformat_impl.h
- mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/qtimer.h
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/qtmetamacros.h
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/qtnoop.h
  mdp:D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/qtpreprocessorsupport.h

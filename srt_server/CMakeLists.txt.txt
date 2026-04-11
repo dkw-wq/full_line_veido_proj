@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.16)
+project(srt_relay_server LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SRT REQUIRED srt)
+
+add_executable(srt_relay_server
+    src/main.cpp
+)
+
+target_include_directories(srt_relay_server PRIVATE ${SRT_INCLUDE_DIRS})
+target_link_directories(srt_relay_server PRIVATE ${SRT_LIBRARY_DIRS})
+target_link_libraries(srt_relay_server PRIVATE ${SRT_LIBRARIES} pthread)
+target_compile_options(srt_relay_server PRIVATE ${SRT_CFLAGS_OTHER})

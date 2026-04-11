@@ -22,7 +22,6 @@ extern "C" {
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QTimer>
 #include <QMetaType>
 #include <QString>
 #include <QStyle>
@@ -48,19 +47,20 @@ extern "C" {
 // ============================================================
 
 enum class PlayerState {
-    Idle,            // 未启动
-    Starting,        // start() 已调用，线程启动中
-    OpeningInput,    // avformat_open_input 进行中
-    ProbingStreams,  // avformat_find_stream_info 进行中
-    Initializing,    // 初始化 video/audio/renderer/recorder 前置
-    WaitingKeyframe, // 已连上，等待第一个关键帧
-    Playing,         // 正常播放
-    Reconnecting,    // 读流失败或初始化失败后的重连中
-    PausedRemote,    // 已向采集端发 pause 并确认
-    Stopping,        // stop() 触发，资源回收中
-    Stopped,         // 完全停止
-    Error            // 致命错误，无法继续
+    Idle,
+    Starting,
+    OpeningInput,
+    ProbingStreams,
+    Initializing,
+    WaitingKeyframe,
+    Playing,
+    Reconnecting,
+    Stopping,
+    Stopped,
+    Error
 };
+// 注意：删掉了 PausedRemote —— 它不是播放线程的真实状态，
+// 而是一个"覆盖显示层"的概念，通过 remote_paused 字段单独表达。
 
 enum class PlayerErrorCode {
     None,
@@ -77,27 +77,55 @@ enum class PlayerErrorCode {
     ControlCommandFailed
 };
 
+// ── RecordPhase：区分"用户意图"和"底层实况" ────────────────
+// 这是解决录制按钮闪烁的关键：
+//   Idle          → 用户未请求，底层也未录制
+//   Requested     → 用户已点"开始录制"，底层尚未 start
+//   Active        → 底层已确认开始录制
+//   StopRequested → 用户已点"停止录制"，底层尚未 stop
+enum class RecordPhase {
+    Idle,
+    Requested,
+    Active,
+    StopRequested
+};
+
 struct PlayerStatus {
-    PlayerState     state            = PlayerState::Idle;
-    PlayerErrorCode error            = PlayerErrorCode::None;
+    // ── 播放线程驱动的字段（只有播放线程写） ──────────────────
+    PlayerState     state              = PlayerState::Idle;
+    PlayerErrorCode error              = PlayerErrorCode::None;
     QString         message;
-    bool            audio_available  = false;
-    bool            recording        = false;
-    bool            remote_paused    = false;
+    bool            audio_available    = false;
     QString         url;
-    int             reconnect_count  = 0;
+    int             reconnect_count    = 0;
     qint64          last_packet_ms_ago = -1;
-    double          audio_clock      = -1.0;
+    double          audio_clock        = -1.0;
+
+    // ── 用户意图字段（只有主线程写） ──────────────────────────
+    // remote_paused：用户是否已向推流端发出暂停指令并成功
+    // 这个字段永远不影响 state，UI 显示时单独叠加处理
+    bool            remote_paused      = false;
+
+    // record_phase：录制的完整生命周期，包含意图和实况两层
+    RecordPhase     record_phase       = RecordPhase::Idle;
 };
 
 Q_DECLARE_METATYPE(PlayerStatus)
 
 // ============================================================
-// 状态→可读字符串
+// UI 渲染辅助函数
+// 所有 UI 状态的计算集中在这里，不散落在各处
 // ============================================================
 
-static QString stateLabel(PlayerState s) {
-    switch (s) {
+// "有效显示状态"：remote_paused 时覆盖主状态，仅影响显示，不改数据
+static PlayerState effectiveDisplayState(const PlayerStatus& s) {
+    if (s.remote_paused) return PlayerState::Idle; // 用一个不存在的枚举占位
+    return s.state;
+}
+
+static QString stateText(const PlayerStatus& s) {
+    if (s.remote_paused) return "远端已暂停";
+    switch (s.state) {
         case PlayerState::Idle:            return "空闲";
         case PlayerState::Starting:        return "启动中";
         case PlayerState::OpeningInput:    return "连接输入...";
@@ -106,24 +134,44 @@ static QString stateLabel(PlayerState s) {
         case PlayerState::WaitingKeyframe: return "等待关键帧...";
         case PlayerState::Playing:         return "播放中";
         case PlayerState::Reconnecting:    return "重连中";
-        case PlayerState::PausedRemote:    return "远端已暂停";
         case PlayerState::Stopping:        return "停止中";
         case PlayerState::Stopped:         return "已停止";
         case PlayerState::Error:           return "错误";
     }
-    return "";
+    return {};
 }
 
-// 状态对应的指示灯颜色 (CSS-like hex，用于 QLabel styleSheet)
-static QString stateDotColor(PlayerState s) {
-    switch (s) {
-        case PlayerState::Playing:      return "#1d9e75";
-        case PlayerState::PausedRemote: return "#ef9f27";
-        case PlayerState::Error:        return "#e24b4a";
-        case PlayerState::Stopped:
-        case PlayerState::Idle:         return "#888780";
-        default:                        return "#378add";
+static QString dotColor(const PlayerStatus& s) {
+    if (s.remote_paused) return "#ef9f27";  // 橙
+    switch (s.state) {
+        case PlayerState::Playing:         return "#1d9e75";  // 绿
+        case PlayerState::Error:           return "#e24b4a";  // 红
+        case PlayerState::Reconnecting:
+        case PlayerState::OpeningInput:
+        case PlayerState::ProbingStreams:
+        case PlayerState::Initializing:
+        case PlayerState::WaitingKeyframe:
+        case PlayerState::Starting:        return "#378add";  // 蓝（过渡态）
+        default:                           return "#888780";  // 灰
     }
+}
+
+static std::pair<QString,QString> stateBadgeColors(const PlayerStatus& s) {
+    if (s.remote_paused) return {"#854f0b", "#fac775"};
+    switch (s.state) {
+        case PlayerState::Playing:      return {"#0f6e56", "#9fe1cb"};
+        case PlayerState::Error:        return {"#a32d2d", "#f09595"};
+        case PlayerState::Reconnecting: return {"#185fa5", "#b5d4f4"};
+        default:                        return {"#2c2c2a", "#888780"};
+    }
+}
+
+// 录制按钮：用 RecordPhase 统一决定显示，不读 recorder_.isRecording()
+// Requested / Active → 都显示"停止录制"（用户已有意图，立即响应）
+// StopRequested / Idle → 都显示"开始录制"
+static bool recordBtnShowStop(const PlayerStatus& s) {
+    return s.record_phase == RecordPhase::Requested
+        || s.record_phase == RecordPhase::Active;
 }
 
 // ============================================================
@@ -133,18 +181,18 @@ static QString stateDotColor(PlayerState s) {
 static void print_ffmpeg_error(const char* prefix, int errnum) {
     char buf[AV_ERROR_MAX_STRING_SIZE] = {0};
     av_strerror(errnum, buf, sizeof(buf));
-    std::cerr << prefix << ": " << buf << std::endl;
+    std::cerr << prefix << ": " << buf << "\n";
 }
 
 // ============================================================
-// HW decode helpers (全局，与原版相同)
+// HW decode helpers
 // ============================================================
 
-static AVBufferRef*        g_hw_device_ctx = nullptr;
-static enum AVPixelFormat  g_hw_pix_fmt    = AV_PIX_FMT_NONE;
+static AVBufferRef*       g_hw_device_ctx = nullptr;
+static enum AVPixelFormat g_hw_pix_fmt    = AV_PIX_FMT_NONE;
 
-static enum AVPixelFormat hw_get_format(AVCodecContext*, const enum AVPixelFormat* pix_fmts) {
-    for (const enum AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p)
+static enum AVPixelFormat hw_get_format(AVCodecContext*, const enum AVPixelFormat* fmts) {
+    for (const auto* p = fmts; *p != AV_PIX_FMT_NONE; ++p)
         if (*p == g_hw_pix_fmt) return *p;
     std::cerr << "HW surface format not found\n";
     return AV_PIX_FMT_NONE;
@@ -154,45 +202,45 @@ static bool init_hw_device(AVCodecContext* ctx, const char* device) {
     g_hw_pix_fmt = AV_PIX_FMT_NONE;
     AVHWDeviceType type = av_hwdevice_find_type_by_name(device);
     if (type == AV_HWDEVICE_TYPE_NONE) return false;
-    const AVCodecHWConfig* config = nullptr;
-    for (int i = 0; (config = avcodec_get_hw_config(ctx->codec, i)); ++i) {
-        if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
-            config->device_type == type) {
-            g_hw_pix_fmt = config->pix_fmt;
+    const AVCodecHWConfig* cfg = nullptr;
+    for (int i = 0; (cfg = avcodec_get_hw_config(ctx->codec, i)); ++i) {
+        if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
+            cfg->device_type == type) {
+            g_hw_pix_fmt = cfg->pix_fmt;
             break;
         }
     }
     if (g_hw_pix_fmt == AV_PIX_FMT_NONE) return false;
-    int ret = av_hwdevice_ctx_create(&g_hw_device_ctx, type, nullptr, nullptr, 0);
-    if (ret < 0) { print_ffmpeg_error("av_hwdevice_ctx_create", ret); return false; }
+    int r = av_hwdevice_ctx_create(&g_hw_device_ctx, type, nullptr, nullptr, 0);
+    if (r < 0) { print_ffmpeg_error("av_hwdevice_ctx_create", r); return false; }
     ctx->hw_device_ctx = av_buffer_ref(g_hw_device_ctx);
     ctx->get_format    = hw_get_format;
     return true;
 }
 
 static int interrupt_cb(void* opaque) {
-    auto* stop = reinterpret_cast<std::atomic<bool>*>(opaque);
-    return (stop && stop->load()) ? 1 : 0;
+    return reinterpret_cast<std::atomic<bool>*>(opaque)->load() ? 1 : 0;
 }
 
 // ============================================================
-// AudioPipeline (与原版相同，增加 audio_available 报告)
+// AudioPipeline
 // ============================================================
 
 class AudioPipeline {
 public:
     ~AudioPipeline() { cleanup(); }
 
-    bool init(AVFormatContext* fmt_ctx, int stream_index, const AVCodec* decoder) {
-        if (stream_index < 0 || !decoder) return false;
+    bool init(AVFormatContext* fmt_ctx, int stream_index, const AVCodec* dec) {
+        if (stream_index < 0 || !dec) return false;
         stream_index_ = stream_index;
         stream_       = fmt_ctx->streams[stream_index_];
-        codec_ctx_    = avcodec_alloc_context3(decoder);
+        codec_ctx_    = avcodec_alloc_context3(dec);
         if (!codec_ctx_) return false;
         if (avcodec_parameters_to_context(codec_ctx_, stream_->codecpar) < 0) { cleanup(); return false; }
-        if (avcodec_open2(codec_ctx_, decoder, nullptr) < 0)                   { cleanup(); return false; }
+        if (avcodec_open2(codec_ctx_, dec, nullptr) < 0)                       { cleanup(); return false; }
 
-        out_channels_ = std::min(2, codec_ctx_->ch_layout.nb_channels > 0 ? codec_ctx_->ch_layout.nb_channels : 2);
+        out_channels_ = std::min(2, codec_ctx_->ch_layout.nb_channels > 0
+                                    ? codec_ctx_->ch_layout.nb_channels : 2);
         out_rate_     = codec_ctx_->sample_rate > 0 ? codec_ctx_->sample_rate : 48000;
 
         QAudioFormat fmt;
@@ -209,41 +257,42 @@ public:
     }
 
     bool handlePacket(AVPacket* pkt) {
-        if (!codec_ctx_ || !sink_ || !io_) return false;
-        int ret = avcodec_send_packet(codec_ctx_, pkt);
-        if (ret < 0) return false;
+        if (!codec_ctx_ || !io_) return false;
+        if (avcodec_send_packet(codec_ctx_, pkt) < 0) return false;
+        int ret = 0;
         while (ret >= 0) {
             ret = avcodec_receive_frame(codec_ctx_, frame_);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
             if (ret < 0) break;
-            const int in_ch   = frame_->ch_layout.nb_channels > 0 ? frame_->ch_layout.nb_channels : out_channels_;
+            const int in_ch   = frame_->ch_layout.nb_channels > 0
+                                 ? frame_->ch_layout.nb_channels : out_channels_;
             const int samples = frame_->nb_samples;
             if (samples <= 0) { av_frame_unref(frame_); continue; }
-            std::vector<int16_t> interleaved(samples * out_channels_);
+
+            std::vector<int16_t> buf(samples * out_channels_);
             if (frame_->format == AV_SAMPLE_FMT_FLTP) {
-                const float* left  = reinterpret_cast<const float*>(frame_->data[0]);
-                const float* right = (in_ch > 1) ? reinterpret_cast<const float*>(frame_->data[1]) : nullptr;
+                const float* L = reinterpret_cast<const float*>(frame_->data[0]);
+                const float* R = (in_ch > 1) ? reinterpret_cast<const float*>(frame_->data[1]) : nullptr;
                 for (int i = 0; i < samples; ++i) {
-                    float l = left[i], r = right ? right[i] : l;
-                    interleaved[2*i]   = static_cast<int16_t>(std::clamp(l,-1.f,1.f)*32767.f);
-                    interleaved[2*i+1] = static_cast<int16_t>(std::clamp(r,-1.f,1.f)*32767.f);
+                    float l = L[i], r = R ? R[i] : l;
+                    buf[2*i]   = static_cast<int16_t>(std::clamp(l,-1.f,1.f)*32767.f);
+                    buf[2*i+1] = static_cast<int16_t>(std::clamp(r,-1.f,1.f)*32767.f);
                 }
             } else if (frame_->format == AV_SAMPLE_FMT_S16) {
                 const auto* p = reinterpret_cast<const int16_t*>(frame_->data[0]);
-                interleaved.assign(p, p + samples * in_ch);
+                buf.assign(p, p + samples * in_ch);
                 if (in_ch == 1)
                     for (int i = samples-1; i >= 0; --i) {
-                        int16_t v = interleaved[i];
-                        interleaved[2*i] = interleaved[2*i+1] = v;
+                        int16_t v = buf[i]; buf[2*i] = buf[2*i+1] = v;
                     }
             } else { av_frame_unref(frame_); continue; }
-            io_->write(reinterpret_cast<const char*>(interleaved.data()),
-                       static_cast<qint64>(interleaved.size() * sizeof(int16_t)));
-            if (frame_->best_effort_timestamp != AV_NOPTS_VALUE) {
-                const double pts_sec       = frame_->best_effort_timestamp * av_q2d(stream_->time_base);
-                const double frame_dur     = static_cast<double>(samples) / out_rate_;
-                clock_sec_ = pts_sec + frame_dur;
-            }
+
+            io_->write(reinterpret_cast<const char*>(buf.data()),
+                       static_cast<qint64>(buf.size() * sizeof(int16_t)));
+
+            if (frame_->best_effort_timestamp != AV_NOPTS_VALUE)
+                clock_sec_ = frame_->best_effort_timestamp * av_q2d(stream_->time_base)
+                             + static_cast<double>(samples) / out_rate_;
             av_frame_unref(frame_);
         }
         return true;
@@ -255,11 +304,9 @@ public:
     void cleanup() {
         if (sink_)      { sink_->stop(); delete sink_; sink_ = nullptr; }
         io_ = nullptr;
-        if (frame_)     av_frame_free(&frame_);
-        if (codec_ctx_) avcodec_free_context(&codec_ctx_);
-        stream_       = nullptr;
-        stream_index_ = -1;
-        clock_sec_    = -1.0;
+        if (frame_)     { av_frame_free(&frame_); frame_ = nullptr; }
+        if (codec_ctx_) { avcodec_free_context(&codec_ctx_); }
+        stream_ = nullptr; stream_index_ = -1; clock_sec_ = -1.0;
     }
 
 private:
@@ -275,63 +322,60 @@ private:
 };
 
 // ============================================================
-// VideoPipeline (与原版相同)
+// VideoPipeline
 // ============================================================
 
 class VideoPipeline {
 public:
     ~VideoPipeline() { cleanup(); }
 
-    bool init(AVFormatContext* fmt_ctx, int stream_index, const AVCodec* decoder) {
-        if (stream_index < 0 || !decoder) return false;
+    bool init(AVFormatContext* fmt_ctx, int stream_index, const AVCodec* dec) {
+        if (stream_index < 0 || !dec) return false;
         stream_index_ = stream_index;
         stream_       = fmt_ctx->streams[stream_index_];
-        codec_ctx_    = avcodec_alloc_context3(decoder);
+        codec_ctx_    = avcodec_alloc_context3(dec);
         if (!codec_ctx_) return false;
         if (avcodec_parameters_to_context(codec_ctx_, stream_->codecpar) < 0) { cleanup(); return false; }
         codec_ctx_->thread_count = 1;
         codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
         if (!init_hw_device(codec_ctx_, "d3d11va")) { cleanup(); return false; }
-        if (avcodec_open2(codec_ctx_, decoder, nullptr) < 0) { cleanup(); return false; }
-        width_      = codec_ctx_->width;
-        height_     = codec_ctx_->height;
-        time_base_  = stream_->time_base;
-        frame_      = av_frame_alloc();
+        if (avcodec_open2(codec_ctx_, dec, nullptr) < 0)  { cleanup(); return false; }
+        width_     = codec_ctx_->width;
+        height_    = codec_ctx_->height;
+        time_base_ = stream_->time_base;
+        frame_     = av_frame_alloc();
         return frame_ != nullptr;
     }
 
-    // 返回 false 表示渲染器初始化失败（需外部切 Error 状态）
     bool handlePacket(AVPacket* pkt,
-                      AVD3D11VADeviceContext* d3d_ctx,
+                      AVD3D11VADeviceContext* d3d,
                       HWND hwnd,
                       double audio_clock,
                       std::atomic<bool>& stop_flag,
-                      bool& renderer_init_failed_out) {
+                      bool& renderer_failed_out) {
         if (!codec_ctx_) return false;
-        renderer_init_failed_out = false;
-        int ret = avcodec_send_packet(codec_ctx_, pkt);
-        if (ret < 0) { print_ffmpeg_error("video: send_packet", ret); return false; }
+        renderer_failed_out = false;
+        if (avcodec_send_packet(codec_ctx_, pkt) < 0) return false;
+        int ret = 0;
         while (ret >= 0) {
             ret = avcodec_receive_frame(codec_ctx_, frame_);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
-            if (ret < 0) { print_ffmpeg_error("video: receive_frame", ret); break; }
+            if (ret < 0) break;
             if (!renderer_ready_) {
-                if (frame_->width > 0 && frame_->height > 0 &&
-                    d3d_ctx && d3d_ctx->device && d3d_ctx->device_context &&
-                    renderer_.initialize(hwnd, d3d_ctx->device, d3d_ctx->device_context,
+                if (frame_->width > 0 && frame_->height > 0 && d3d &&
+                    renderer_.initialize(hwnd, d3d->device, d3d->device_context,
                                          frame_->width, frame_->height)) {
                     renderer_ready_ = true;
-                    width_  = frame_->width;
-                    height_ = frame_->height;
+                    width_ = frame_->width; height_ = frame_->height;
                 } else {
-                    renderer_init_failed_out = true;
+                    renderer_failed_out = true;
                     stop_flag.store(true);
                     av_frame_unref(frame_);
                     break;
                 }
             }
             if (frame_->format != g_hw_pix_fmt) {
-                if (!warned_sw_) { std::cerr << "video: non-HW frame, skipping\n"; warned_sw_ = true; }
+                if (!warned_sw_) { std::cerr << "video: non-HW frame skipped\n"; warned_sw_ = true; }
                 av_frame_unref(frame_); continue;
             }
             const double vpts = frame_->best_effort_timestamp * av_q2d(time_base_);
@@ -347,16 +391,13 @@ public:
     }
 
     void cleanup() {
-        if (frame_)     av_frame_free(&frame_);
+        if (frame_)     { av_frame_free(&frame_); frame_ = nullptr; }
         if (codec_ctx_) {
             if (codec_ctx_->hw_device_ctx) av_buffer_unref(&codec_ctx_->hw_device_ctx);
             avcodec_free_context(&codec_ctx_);
         }
         renderer_.shutdown();
-        stream_         = nullptr;
-        stream_index_   = -1;
-        renderer_ready_ = false;
-        warned_sw_      = false;
+        stream_ = nullptr; stream_index_ = -1; renderer_ready_ = false; warned_sw_ = false;
     }
 
     int        streamIndex() const { return stream_index_; }
@@ -370,12 +411,21 @@ private:
     D3D11Renderer   renderer_;
     bool            renderer_ready_ = false;
     bool            warned_sw_      = false;
-    int             width_  = 0, height_ = 0;
+    int             width_ = 0, height_ = 0;
     AVRational      time_base_{1,1};
 };
 
 // ============================================================
-// FFmpegD3D11Player  —  QObject，带完整状态机
+// FFmpegD3D11Player — QObject + 重构后的状态机
+//
+// 核心设计原则：
+//   1. PlayerStatus 是唯一状态源，所有 UI 从同一份快照渲染
+//   2. state 字段只由播放线程写，外部不得修改
+//   3. remote_paused 只由主线程写，不干预 state
+//   4. record_phase 是录制的完整生命周期（意图 + 实况），
+//      播放线程负责将 Requested→Active, StopRequested→Idle
+//   5. 所有状态变更都通过 commitStatus() 统一触发 emit，
+//      不存在零散的 setStatus / emitCurrentStatus 混用
 // ============================================================
 
 class FFmpegD3D11Player : public QObject {
@@ -392,35 +442,59 @@ public:
     bool start() {
         if (running_) return true;
         running_ = true;
-        setStatus(PlayerState::Starting, PlayerErrorCode::None, "线程启动中");
+        mutateStatus([&](PlayerStatus& s) {
+            s.state   = PlayerState::Starting;
+            s.message = "线程启动中";
+        });
         worker_ = std::thread(&FFmpegD3D11Player::run, this);
         return true;
     }
 
     void stop() {
         if (!running_) return;
-        setStatus(PlayerState::Stopping, PlayerErrorCode::None, "正在停止");
+        mutateStatus([&](PlayerStatus& s) {
+            s.state   = PlayerState::Stopping;
+            s.message = "正在停止";
+        });
         stopFlag_.store(true);
         if (worker_.joinable()) worker_.join();
         running_ = false;
-        setStatus(PlayerState::Stopped, PlayerErrorCode::None, "已停止");
+        mutateStatus([&](PlayerStatus& s) {
+            s.state   = PlayerState::Stopped;
+            s.message = "已停止";
+        });
     }
 
-    void startRecord(const std::string& path) {
-        std::lock_guard<std::mutex> lk(recordMutex_);
-        recordPath_    = path;
-        recordEnabled_.store(true);
+    // ── 录制控制：只改意图字段，播放线程负责落地 ──────────────
+    // 立即 emit，UI 立即响应，不等播放线程
+    void requestStartRecord(const std::string& path) {
+        {
+            std::lock_guard<std::mutex> lk(recordPathMutex_);
+            recordPath_ = path;
+        }
+        mutateStatus([](PlayerStatus& s) {
+            if (s.record_phase == RecordPhase::Idle)
+                s.record_phase = RecordPhase::Requested;
+        });
     }
 
-    void stopRecord() {
-        recordEnabled_.store(false);
-        recorder_.stop();
-        // 状态快照里 recording 字段会在下次 setStatus 时刷新，
-        // 这里直接 emit 一次最新快照即可
-        emitCurrentStatus();
+    void requestStopRecord() {
+        mutateStatus([](PlayerStatus& s) {
+            if (s.record_phase == RecordPhase::Active ||
+                s.record_phase == RecordPhase::Requested)
+                s.record_phase = RecordPhase::StopRequested;
+        });
     }
 
-    bool isRecording() const { return recorder_.isRecording(); }
+    // ── 远端暂停控制：只改 remote_paused，不碰 state ──────────
+    // 调用方已确认指令成功后才调用此函数
+    void setRemotePaused(bool paused) {
+        mutateStatus([paused](PlayerStatus& s) {
+            s.remote_paused = paused;
+            // state 完全不动：播放线程继续独立运行，
+            // UI 层通过 stateText(s) / dotColor(s) 统一处理覆盖逻辑
+        });
+    }
 
     PlayerStatus currentStatus() const {
         std::lock_guard<std::mutex> lk(statusMutex_);
@@ -431,20 +505,16 @@ signals:
     void statusChanged(const PlayerStatus& status);
 
 private:
-    // ---- 状态管理 ----
-
-    void setStatus(PlayerState state,
-                   PlayerErrorCode error,
-                   const QString& message) {
+    // ----------------------------------------------------------------
+    // mutateStatus — 唯一的状态修改入口
+    // 接受一个 lambda，在锁内修改 status_，然后调度到主线程 emit
+    // ----------------------------------------------------------------
+    template<typename Fn>
+    void mutateStatus(Fn&& fn) {
         {
             std::lock_guard<std::mutex> lk(statusMutex_);
-            status_.state          = state;
-            status_.error          = error;
-            status_.message        = message;
-            status_.recording      = recorder_.isRecording();
-            status_.url            = QString::fromStdString(url_);
+            fn(status_);
         }
-        // signal 必须从 Qt 线程发，用 QMetaObject::invokeMethod 跨线程安全
         QMetaObject::invokeMethod(this, [this] {
             PlayerStatus snap;
             {
@@ -455,201 +525,208 @@ private:
         }, Qt::QueuedConnection);
     }
 
-    void emitCurrentStatus() {
-        QMetaObject::invokeMethod(this, [this] {
-            PlayerStatus snap;
-            {
-                std::lock_guard<std::mutex> lk(statusMutex_);
-                snap = status_;
-            }
-            emit statusChanged(snap);
-        }, Qt::QueuedConnection);
+    // ── 播放线程专用的状态写函数（不写 remote_paused / record_phase） ──
+    // 只更新 state / error / message / audio_available / reconnect_count
+    void setPlaybackStatus(PlayerState state, PlayerErrorCode error, const QString& message,
+                           bool audio_available_override = false, bool set_audio = false) {
+        mutateStatus([&](PlayerStatus& s) {
+            s.state           = state;
+            s.error           = error;
+            s.message         = message;
+            s.reconnect_count = reconnect_count_;
+            s.url             = QString::fromStdString(url_);
+            if (set_audio) s.audio_available = audio_available_override;
+        });
     }
 
-    // ---- 主播放线程 ----
+    // ----------------------------------------------------------------
+    // 主播放线程
+    // ----------------------------------------------------------------
 
     void run() {
         while (!stopFlag_.load()) {
             video_synced_ = false;
 
-            // ---------- OpeningInput ----------
-            setStatus(PlayerState::OpeningInput, PlayerErrorCode::None, "正在连接 " + QString::fromStdString(url_));
+            // ── OpeningInput ──────────────────────────────────────────
+            setPlaybackStatus(PlayerState::OpeningInput, PlayerErrorCode::None,
+                              "正在连接 " + QString::fromStdString(url_));
 
             AVFormatContext* fmt_ctx = avformat_alloc_context();
             if (!fmt_ctx) {
-                setStatus(PlayerState::Error, PlayerErrorCode::OpenInputFailed, "avformat_alloc_context 失败");
+                setPlaybackStatus(PlayerState::Error, PlayerErrorCode::OpenInputFailed,
+                                  "avformat_alloc_context 失败");
                 break;
             }
             fmt_ctx->interrupt_callback.callback = interrupt_cb;
             fmt_ctx->interrupt_callback.opaque   = &stopFlag_;
 
             AVDictionary* opts = nullptr;
-            av_dict_set(&opts, "fflags",           "nobuffer", 0);
-            av_dict_set(&opts, "flags",            "low_delay", 0);
-            av_dict_set(&opts, "analyzeduration",  "500000", 0);
-            av_dict_set(&opts, "probesize",        "32768", 0);
+            av_dict_set(&opts, "fflags",          "nobuffer", 0);
+            av_dict_set(&opts, "flags",           "low_delay", 0);
+            av_dict_set(&opts, "analyzeduration", "500000",   0);
+            av_dict_set(&opts, "probesize",       "32768",    0);
 
             int open_ret = avformat_open_input(&fmt_ctx, url_.c_str(), nullptr, &opts);
             av_dict_free(&opts);
             if (open_ret < 0) {
-                char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
-                av_strerror(open_ret, errbuf, sizeof(errbuf));
+                char eb[AV_ERROR_MAX_STRING_SIZE]{};
+                av_strerror(open_ret, eb, sizeof(eb));
                 avformat_free_context(fmt_ctx);
                 if (stopFlag_.load()) break;
                 ++reconnect_count_;
-                setStatus(PlayerState::Reconnecting, PlayerErrorCode::OpenInputFailed,
-                          QString("连接失败: %1  (第%2次重连)").arg(errbuf).arg(reconnect_count_));
+                setPlaybackStatus(PlayerState::Reconnecting, PlayerErrorCode::OpenInputFailed,
+                                  QString("连接失败: %1  (第%2次重连)").arg(eb).arg(reconnect_count_));
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 continue;
             }
 
-            // ---------- ProbingStreams ----------
-            setStatus(PlayerState::ProbingStreams, PlayerErrorCode::None, "探测流信息...");
-            if (int ret = avformat_find_stream_info(fmt_ctx, nullptr); ret < 0) {
-                char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
-                av_strerror(ret, errbuf, sizeof(errbuf));
+            // ── ProbingStreams ────────────────────────────────────────
+            setPlaybackStatus(PlayerState::ProbingStreams, PlayerErrorCode::None, "探测流信息...");
+            if (int r = avformat_find_stream_info(fmt_ctx, nullptr); r < 0) {
+                char eb[AV_ERROR_MAX_STRING_SIZE]{};
+                av_strerror(r, eb, sizeof(eb));
                 avformat_close_input(&fmt_ctx);
                 if (stopFlag_.load()) break;
                 ++reconnect_count_;
-                setStatus(PlayerState::Reconnecting, PlayerErrorCode::FindStreamInfoFailed,
-                          QString("流信息探测失败: %1  (第%2次重连)").arg(errbuf).arg(reconnect_count_));
+                setPlaybackStatus(PlayerState::Reconnecting, PlayerErrorCode::FindStreamInfoFailed,
+                                  QString("流信息探测失败: %1  (第%2次重连)").arg(eb).arg(reconnect_count_));
                 std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 continue;
             }
 
-            // ---------- Initializing ----------
-            setStatus(PlayerState::Initializing, PlayerErrorCode::None, "初始化解码器...");
+            // ── Initializing ──────────────────────────────────────────
+            setPlaybackStatus(PlayerState::Initializing, PlayerErrorCode::None, "初始化解码器...");
 
-            const AVCodec* decoder = nullptr;
-            int video_idx = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
+            const AVCodec* dec = nullptr;
+            int video_idx = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &dec, 0);
             if (video_idx < 0) {
                 avformat_close_input(&fmt_ctx);
                 if (stopFlag_.load()) break;
-                setStatus(PlayerState::Reconnecting, PlayerErrorCode::NoVideoStream, "未找到视频流，重连中");
                 ++reconnect_count_;
+                setPlaybackStatus(PlayerState::Reconnecting, PlayerErrorCode::NoVideoStream,
+                                  QString("未找到视频流  (第%1次重连)").arg(reconnect_count_));
                 std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 continue;
             }
 
-            const AVCodec* audio_decoder = nullptr;
-            int audio_idx = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, video_idx, &audio_decoder, 0);
+            const AVCodec* audio_dec = nullptr;
+            int audio_idx = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, video_idx, &audio_dec, 0);
             bool audio_ok = (audio_idx >= 0);
 
             VideoPipeline video;
-            if (!video.init(fmt_ctx, video_idx, decoder)) {
+            if (!video.init(fmt_ctx, video_idx, dec)) {
                 avformat_close_input(&fmt_ctx);
                 if (stopFlag_.load()) break;
                 ++reconnect_count_;
-                setStatus(PlayerState::Reconnecting, PlayerErrorCode::VideoInitFailed,
-                          QString("视频解码器初始化失败  (第%1次重连)").arg(reconnect_count_));
+                setPlaybackStatus(PlayerState::Reconnecting, PlayerErrorCode::VideoInitFailed,
+                                  QString("视频解码器初始化失败  (第%1次重连)").arg(reconnect_count_));
                 std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 continue;
             }
 
             AudioPipeline audio;
-            if (!audio.init(fmt_ctx, audio_idx, audio_decoder)) {
-                audio_ok = false; // 音频可选，降级继续
-            }
-            {
-                std::lock_guard<std::mutex> lk(statusMutex_);
-                status_.audio_available = audio_ok;
-            }
+            if (!audio.init(fmt_ctx, audio_idx, audio_dec)) audio_ok = false;
 
-            // 启动录制
-            {
-                std::lock_guard<std::mutex> lk(recordMutex_);
-                if (recordEnabled_.load() && !recorder_.isRecording()) {
-                    if (!recorder_.start(fmt_ctx, video_idx, audio_idx, recordPath_))
-                        std::cerr << "Recorder start failed\n";
-                }
-            }
+            // 同步 audio_available（使用带 set_audio 标志的重载）
+            setPlaybackStatus(PlayerState::Initializing, PlayerErrorCode::None,
+                              "初始化解码器...", audio_ok, true);
 
-            // 获取 D3D11 设备上下文
-            AVHWDeviceContext*      hwdev   = g_hw_device_ctx ? reinterpret_cast<AVHWDeviceContext*>(g_hw_device_ctx->data) : nullptr;
-            AVD3D11VADeviceContext* d3d11ctx = hwdev ? reinterpret_cast<AVD3D11VADeviceContext*>(hwdev->hwctx) : nullptr;
+            auto* hwdev    = g_hw_device_ctx
+                             ? reinterpret_cast<AVHWDeviceContext*>(g_hw_device_ctx->data) : nullptr;
+            auto* d3d11ctx = hwdev
+                             ? reinterpret_cast<AVD3D11VADeviceContext*>(hwdev->hwctx) : nullptr;
             if (!d3d11ctx || !d3d11ctx->device || !d3d11ctx->device_context) {
-                video.cleanup(); audio.cleanup();
-                avformat_close_input(&fmt_ctx);
+                video.cleanup(); audio.cleanup(); avformat_close_input(&fmt_ctx);
                 if (g_hw_device_ctx) { av_buffer_unref(&g_hw_device_ctx); g_hw_pix_fmt = AV_PIX_FMT_NONE; }
                 if (stopFlag_.load()) break;
                 ++reconnect_count_;
-                setStatus(PlayerState::Reconnecting, PlayerErrorCode::D3D11ContextFailed,
-                          QString("D3D11 设备获取失败  (第%1次重连)").arg(reconnect_count_));
+                setPlaybackStatus(PlayerState::Reconnecting, PlayerErrorCode::D3D11ContextFailed,
+                                  QString("D3D11 设备获取失败  (第%1次重连)").arg(reconnect_count_));
                 std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 continue;
             }
 
             AVPacket* pkt = av_packet_alloc();
             if (!pkt) {
-                video.cleanup(); audio.cleanup();
-                avformat_close_input(&fmt_ctx);
+                video.cleanup(); audio.cleanup(); avformat_close_input(&fmt_ctx);
                 if (g_hw_device_ctx) { av_buffer_unref(&g_hw_device_ctx); g_hw_pix_fmt = AV_PIX_FMT_NONE; }
-                setStatus(PlayerState::Error, PlayerErrorCode::PacketAllocFailed, "av_packet_alloc 失败");
+                setPlaybackStatus(PlayerState::Error, PlayerErrorCode::PacketAllocFailed,
+                                  "av_packet_alloc 失败");
                 break;
             }
 
-            // 成功进入 WaitingKeyframe
             reconnect_count_ = 0;
-            setStatus(PlayerState::WaitingKeyframe, PlayerErrorCode::None, "等待关键帧...");
+            setPlaybackStatus(PlayerState::WaitingKeyframe, PlayerErrorCode::None, "等待关键帧...");
 
             auto last_pkt_time = std::chrono::steady_clock::now();
 
-            // ---------- 读包循环 ----------
+            // ── 读包循环 ─────────────────────────────────────────────
             while (!stopFlag_.load()) {
-                // 录制状态同步
-                if (recordEnabled_.load() && !recorder_.isRecording()) {
-                    std::lock_guard<std::mutex> lk(recordMutex_);
-                    if (!recorder_.isRecording()) {
-                        if (!recorder_.start(fmt_ctx, video_idx, audio_idx, recordPath_))
-                            std::cerr << "Recorder start failed\n";
+
+                // ── 录制生命周期管理（意图 → 实况转换） ─────────────
+                // 这是解决录制按钮异步问题的核心：
+                //   Requested    → 调用 recorder_.start()，成功则推进到 Active
+                //   StopRequested→ 调用 recorder_.stop()，完成后推进到 Idle
+                // 全部在播放线程内完成，无竞态
+                {
+                    RecordPhase phase;
+                    {
+                        std::lock_guard<std::mutex> lk(statusMutex_);
+                        phase = status_.record_phase;
                     }
-                } else if (!recordEnabled_.load() && recorder_.isRecording()) {
-                    recorder_.stop();
+
+                    if (phase == RecordPhase::Requested) {
+                        std::string path;
+                        { std::lock_guard<std::mutex> lk(recordPathMutex_); path = recordPath_; }
+                        bool started = recorder_.start(fmt_ctx, video_idx, audio_idx, path);
+                        mutateStatus([started](PlayerStatus& s) {
+                            s.record_phase = started ? RecordPhase::Active : RecordPhase::Idle;
+                        });
+                    } else if (phase == RecordPhase::StopRequested) {
+                        recorder_.stop();
+                        mutateStatus([](PlayerStatus& s) {
+                            s.record_phase = RecordPhase::Idle;
+                        });
+                    }
                 }
 
-                // 刷新 last_packet_ms_ago 和 audio_clock 到 status
+                // 刷新非关键实时字段（不 emit，避免过频繁）
                 {
-                    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - last_pkt_time).count();
                     std::lock_guard<std::mutex> lk(statusMutex_);
-                    status_.last_packet_ms_ago = now_ms;
+                    status_.last_packet_ms_ago = elapsed;
                     status_.audio_clock        = audio.clock();
-                    status_.recording          = recorder_.isRecording();
-                    status_.reconnect_count    = reconnect_count_;
                 }
 
                 int ret = av_read_frame(fmt_ctx, pkt);
                 if (ret < 0) {
-                    if (ret != AVERROR_EOF && ret != AVERROR_EXIT) {
-                        char errbuf[AV_ERROR_MAX_STRING_SIZE]{};
-                        av_strerror(ret, errbuf, sizeof(errbuf));
-                        if (stopFlag_.load()) break;
+                    if (ret != AVERROR_EOF && ret != AVERROR_EXIT && !stopFlag_.load()) {
+                        char eb[AV_ERROR_MAX_STRING_SIZE]{};
+                        av_strerror(ret, eb, sizeof(eb));
                         ++reconnect_count_;
-                        setStatus(PlayerState::Reconnecting, PlayerErrorCode::ReadFrameFailed,
-                                  QString("读帧失败: %1  (第%2次重连)").arg(errbuf).arg(reconnect_count_));
+                        setPlaybackStatus(PlayerState::Reconnecting, PlayerErrorCode::ReadFrameFailed,
+                                          QString("读帧失败: %1  (第%2次重连)").arg(eb).arg(reconnect_count_));
                     }
                     break;
                 }
 
                 last_pkt_time = std::chrono::steady_clock::now();
 
-                if (recorder_.isRecording())
-                    recorder_.writePacket(pkt);
+                if (recorder_.isRecording()) recorder_.writePacket(pkt);
 
                 if (pkt->stream_index == video.streamIndex()) {
                     if (!video_synced_) {
-                        if (!(pkt->flags & AV_PKT_FLAG_KEY)) {
-                            av_packet_unref(pkt);
-                            continue;
-                        }
+                        if (!(pkt->flags & AV_PKT_FLAG_KEY)) { av_packet_unref(pkt); continue; }
                         video_synced_ = true;
-                        setStatus(PlayerState::Playing, PlayerErrorCode::None,
-                                  audio_ok ? "播放中（含音频）" : "播放中（无音频）");
+                        setPlaybackStatus(PlayerState::Playing, PlayerErrorCode::None,
+                                          audio_ok ? "播放中（含音频）" : "播放中（无音频）");
                     }
-                    bool renderer_failed = false;
-                    video.handlePacket(pkt, d3d11ctx, hwnd_, audio.clock(), stopFlag_, renderer_failed);
-                    if (renderer_failed) {
-                        setStatus(PlayerState::Error, PlayerErrorCode::RendererInitFailed, "渲染器初始化失败");
+                    bool rfail = false;
+                    video.handlePacket(pkt, d3d11ctx, hwnd_, audio.clock(), stopFlag_, rfail);
+                    if (rfail) {
+                        setPlaybackStatus(PlayerState::Error, PlayerErrorCode::RendererInitFailed,
+                                          "渲染器初始化失败");
                         break;
                     }
                 } else if (pkt->stream_index == audio.streamIndex()) {
@@ -658,19 +735,25 @@ private:
 
                 av_packet_unref(pkt);
 
-                // 超时检测（5 秒无包）
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_pkt_time).count() > 5000) {
+                // 5 秒无数据 → 重连
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - last_pkt_time).count() > 5000) {
                     if (stopFlag_.load()) break;
                     ++reconnect_count_;
-                    setStatus(PlayerState::Reconnecting, PlayerErrorCode::ReadFrameFailed,
-                              QString("5秒无数据包，重连  (第%1次)").arg(reconnect_count_));
+                    setPlaybackStatus(PlayerState::Reconnecting, PlayerErrorCode::ReadFrameFailed,
+                                      QString("5秒无数据，重连  (第%1次)").arg(reconnect_count_));
                     break;
                 }
             }
 
-            // ---------- 清理本次连接 ----------
-            recorder_.stop();
+            // ── 清理本次连接（若录制在跑则停止） ─────────────────────
+            if (recorder_.isRecording()) {
+                recorder_.stop();
+                mutateStatus([](PlayerStatus& s) {
+                    s.record_phase = RecordPhase::Idle;
+                });
+            }
+
             av_packet_free(&pkt);
             video.cleanup();
             audio.cleanup();
@@ -681,32 +764,35 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
 
-        // 线程退出
-        if (status_.state != PlayerState::Error && status_.state != PlayerState::Stopping)
-            setStatus(PlayerState::Stopped, PlayerErrorCode::None, "播放线程已退出");
+        {
+            std::lock_guard<std::mutex> lk(statusMutex_);
+            if (status_.state != PlayerState::Error &&
+                status_.state != PlayerState::Stopping)
+                ; // 下面的 setPlaybackStatus 会处理
+        }
+        setPlaybackStatus(PlayerState::Stopped, PlayerErrorCode::None, "播放线程已退出");
     }
 
-    // ---- 成员变量 ----
+    // ---- 成员 ----
     HWND        hwnd_;
     std::string url_;
     std::thread worker_;
 
     std::atomic<bool> stopFlag_{false};
-    bool              running_      = false;
-    bool              video_synced_ = false;
+    bool              running_         = false;
+    bool              video_synced_    = false;
     int               reconnect_count_ = 0;
 
     Recorder          recorder_;
-    std::atomic<bool> recordEnabled_{false};
-    std::string       recordPath_ = "record.ts";
-    std::mutex        recordMutex_;
+    std::string       recordPath_  = "record.ts";
+    std::mutex        recordPathMutex_;
 
     mutable std::mutex statusMutex_;
     PlayerStatus       status_;
 };
 
 // ============================================================
-// 解析 SRT host（与原版相同）
+// SRT host 解析
 // ============================================================
 
 static std::string extract_host_from_srt_url(const std::string& url) {
@@ -722,7 +808,7 @@ static std::string extract_host_from_srt_url(const std::string& url) {
 // main
 // ============================================================
 
-#include "main.moc"   // 让 qmake/cmake-automoc 处理 Q_OBJECT
+#include "main.moc"
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
@@ -733,11 +819,11 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    std::string url            = argv[1];
-    std::string push_ctrl_host = extract_host_from_srt_url(url);
+    const std::string url            = argv[1];
+    const std::string push_ctrl_host = extract_host_from_srt_url(url);
     ControlClient ctrl(push_ctrl_host, 10090);
 
-    // ---- 视频画面 widget ----
+    // ── 视频画面 ────────────────────────────────────────────────────
     QWidget surface;
     surface.setAttribute(Qt::WA_NativeWindow);
     surface.setAttribute(Qt::WA_PaintOnScreen, true);
@@ -745,153 +831,215 @@ int main(int argc, char* argv[]) {
     surface.setAutoFillBackground(false);
     surface.setMinimumSize(640, 360);
 
-    // ---- 容器布局 ----
+    // ── 顶层容器 ────────────────────────────────────────────────────
     QWidget container;
     container.setStyleSheet("background:#111;");
     QVBoxLayout* mainLayout = new QVBoxLayout(&container);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
-
-    // 视频区占满，stretch=1
     mainLayout->addWidget(&surface, 1);
 
-    // ---- 状态栏 ----
+    // ── 状态栏（底部，高 28px）────────────────────────────────────
     QWidget* statusBar = new QWidget;
     statusBar->setFixedHeight(28);
     statusBar->setStyleSheet("background:#1a1a1a;");
+
     QHBoxLayout* statusLayout = new QHBoxLayout(statusBar);
     statusLayout->setContentsMargins(10, 0, 10, 0);
     statusLayout->setSpacing(8);
 
-    // 指示灯（小圆点，用 label + border-radius 模拟）
-    QLabel* dotLabel = new QLabel;
-    dotLabel->setFixedSize(10, 10);
-    dotLabel->setStyleSheet("background:#888780; border-radius:5px;");
+    QLabel* dotLbl   = new QLabel;
+    dotLbl->setFixedSize(10, 10);
+    dotLbl->setStyleSheet("background:#888780; border-radius:5px;");
 
-    QLabel* stateLabel_w = new QLabel("空闲");
-    stateLabel_w->setStyleSheet("color:#b4b2a9; font-size:12px;");
+    QLabel* stateLbl = new QLabel("空闲");
+    stateLbl->setStyleSheet("color:#b4b2a9; font-size:12px; font-weight:500;");
 
-    QLabel* msgLabel = new QLabel;
-    msgLabel->setStyleSheet("color:#5f5e5a; font-size:11px;");
-    msgLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    QLabel* msgLbl = new QLabel;
+    msgLbl->setStyleSheet("color:#5f5e5a; font-size:11px;");
+    msgLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    msgLbl->setMaximumWidth(600);
 
-    QLabel* reconLabel = new QLabel;
-    reconLabel->setStyleSheet("color:#ef9f27; font-size:11px;");
+    QLabel* audioLbl = new QLabel;
+    audioLbl->setStyleSheet("color:#5f5e5a; font-size:11px;");
 
-    QLabel* audioLabel = new QLabel;
-    audioLabel->setStyleSheet("color:#5f5e5a; font-size:11px;");
+    QLabel* reconLbl = new QLabel;
+    reconLbl->setStyleSheet("color:#ef9f27; font-size:11px;");
+    reconLbl->hide();
 
-    statusLayout->addWidget(dotLabel);
-    statusLayout->addWidget(stateLabel_w);
-    statusLayout->addWidget(msgLabel);
+    statusLayout->addWidget(dotLbl);
+    statusLayout->addWidget(stateLbl);
+    statusLayout->addWidget(msgLbl);
     statusLayout->addStretch();
-    statusLayout->addWidget(audioLabel);
-    statusLayout->addWidget(reconLabel);
+    statusLayout->addWidget(audioLbl);
+    statusLayout->addWidget(reconLbl);
 
     mainLayout->addWidget(statusBar, 0);
 
-    // ---- 控制栏（紧凑） ----
+    // ── 控制栏（高 38px）─────────────────────────────────────────
     QWidget* ctrlBar = new QWidget;
-    ctrlBar->setFixedHeight(36);
+    ctrlBar->setFixedHeight(38);
     ctrlBar->setStyleSheet("background:#161616;");
+
     QHBoxLayout* ctrlLayout = new QHBoxLayout(ctrlBar);
-    ctrlLayout->setContentsMargins(10, 4, 10, 4);
+    ctrlLayout->setContentsMargins(10, 5, 10, 5);
     ctrlLayout->setSpacing(6);
 
-    // 通用小按钮样式
-    auto makeBtn = [](const QString& text, const QString& extra = "") -> QPushButton* {
-        auto* btn = new QPushButton(text);
-        btn->setFixedHeight(26);
-        btn->setStyleSheet(
+    QLabel* stateBadge = new QLabel("空闲");
+    stateBadge->setFixedHeight(24);
+    stateBadge->setContentsMargins(8, 0, 8, 0);
+    stateBadge->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    stateBadge->setStyleSheet(
+        "border-radius:4px; font-size:12px; font-weight:500;"
+        "background:#2c2c2a; color:#888780; padding:0 8px;");
+
+    auto makeBtn = [](const QString& text) -> QPushButton* {
+        auto* b = new QPushButton(text);
+        b->setFixedHeight(26);
+        b->setStyleSheet(
             "QPushButton {"
-            "  padding: 0 10px;"
-            "  font-size: 12px;"
-            "  border: 0.5px solid rgba(255,255,255,0.15);"
-            "  border-radius: 5px;"
-            "  background: rgba(255,255,255,0.06);"
-            "  color: #c2c0b6;"
+            "  padding:0 10px; font-size:12px;"
+            "  border:0.5px solid rgba(255,255,255,0.14);"
+            "  border-radius:4px;"
+            "  background:rgba(255,255,255,0.06);"
+            "  color:#c2c0b6;"
             "}"
-            "QPushButton:hover  { background: rgba(255,255,255,0.12); }"
-            "QPushButton:pressed{ background: rgba(255,255,255,0.18); }"
-            + extra);
-        return btn;
+            "QPushButton:hover  { background:rgba(255,255,255,0.11); }"
+            "QPushButton:pressed{ background:rgba(255,255,255,0.18); }");
+        return b;
     };
 
     QPushButton* pauseBtn  = makeBtn("暂停推流");
-    QPushButton* recordBtn = makeBtn("开始录制",
-        "QPushButton[recording=true] {"
-        "  border-color: #e24b4a;"
-        "  color: #f09595;"
-        "}");
+    QPushButton* recordBtn = makeBtn("开始录制");
 
+    ctrlLayout->addWidget(stateBadge);
+    ctrlLayout->addSpacing(6);
     ctrlLayout->addWidget(pauseBtn);
     ctrlLayout->addWidget(recordBtn);
     ctrlLayout->addStretch();
 
     mainLayout->addWidget(ctrlBar, 0);
 
-    // ---- 播放器 ----
+    // ── 播放器实例 ───────────────────────────────────────────────
     HWND hwnd = reinterpret_cast<HWND>(surface.winId());
     FFmpegD3D11Player player(hwnd, url);
 
-    // ---- 状态变化 → 更新 UI ----
+    // ── statusChanged → 全量渲染 UI ─────────────────────────────
+    // 所有 UI 元素都从同一份 PlayerStatus 快照里读，保证一致性。
+    // 没有任何本地 bool 变量参与判断，彻底消除"谁最后写就显示谁"的问题。
     QObject::connect(&player, &FFmpegD3D11Player::statusChanged,
                      [&](const PlayerStatus& s) {
-        // 指示灯颜色
-        dotLabel->setStyleSheet(
-            QString("background:%1; border-radius:5px;").arg(stateDotColor(s.state)));
 
-        stateLabel_w->setText(::stateLabel(s.state));
-        msgLabel->setText(s.message);
+        // 1. 指示灯
+        dotLbl->setStyleSheet(
+            QString("background:%1; border-radius:5px;").arg(dotColor(s)));
 
-        // 重连计数
-        reconLabel->setVisible(s.reconnect_count > 0 &&
-                                s.state == PlayerState::Reconnecting);
-        reconLabel->setText(QString("第%1次重连").arg(s.reconnect_count));
+        // 2. 状态栏文字（统一走 stateText(s)，内部处理 remote_paused 覆盖）
+        stateLbl->setText(stateText(s));
+        msgLbl->setText(s.message);
 
-        // 音频
-        audioLabel->setText(s.audio_available ? "有声" : "无声");
-        audioLabel->setStyleSheet(
-            s.audio_available ? "color:#1d9e75;font-size:11px;"
-                              : "color:#5f5e5a;font-size:11px;");
+        // 3. 重连角标
+        if (s.reconnect_count > 0 && s.state == PlayerState::Reconnecting) {
+            reconLbl->setText(QString("第%1次").arg(s.reconnect_count));
+            reconLbl->show();
+        } else {
+            reconLbl->hide();
+        }
 
-        // 录制按钮文字 & 样式切换
-        recordBtn->setText(s.recording ? "停止录制" : "开始录制");
-        recordBtn->setProperty("recording", s.recording);
-        recordBtn->style()->unpolish(recordBtn);
-        recordBtn->style()->polish(recordBtn);
+        // 4. 音频角标
+        if (s.audio_available) {
+            audioLbl->setText("有声");
+            audioLbl->setStyleSheet("color:#1d9e75; font-size:11px;");
+        } else {
+            audioLbl->setText("无声");
+            audioLbl->setStyleSheet("color:#5f5e5a; font-size:11px;");
+        }
 
-        // 暂停按钮同步
-        bool paused = (s.state == PlayerState::PausedRemote);
-        pauseBtn->setText(paused ? "恢复推流" : "暂停推流");
+        // 5. 控制栏 state badge（统一走 stateBadgeColors(s)）
+        auto [bg, fg] = stateBadgeColors(s);
+        stateBadge->setText(stateText(s));
+        stateBadge->setStyleSheet(
+            QString("border-radius:4px; font-size:12px; font-weight:500;"
+                    "background:%1; color:%2; padding:0 8px;").arg(bg).arg(fg));
+
+        // 6. 暂停按钮 — 只跟 s.remote_paused 走，文字/颜色完全一致
+        if (s.remote_paused) {
+            pauseBtn->setText("恢复推流");
+            pauseBtn->setStyleSheet(
+                "QPushButton {"
+                "  padding:0 10px; font-size:12px;"
+                "  border:0.5px solid #854f0b;"
+                "  border-radius:4px;"
+                "  background:#412402; color:#fac775;"
+                "}"
+                "QPushButton:hover  { background:#633806; }"
+                "QPushButton:pressed{ background:#854f0b; }");
+        } else {
+            pauseBtn->setText("暂停推流");
+            pauseBtn->setStyleSheet(
+                "QPushButton {"
+                "  padding:0 10px; font-size:12px;"
+                "  border:0.5px solid rgba(255,255,255,0.14);"
+                "  border-radius:4px;"
+                "  background:rgba(255,255,255,0.06); color:#c2c0b6;"
+                "}"
+                "QPushButton:hover  { background:rgba(255,255,255,0.11); }"
+                "QPushButton:pressed{ background:rgba(255,255,255,0.18); }");
+        }
+
+        // 7. 录制按钮 — 只跟 s.record_phase 走（recordBtnShowStop 统一计算）
+        //    Requested / Active → "停止录制"（用户意图已登记，立即切换）
+        //    StopRequested / Idle → "开始录制"
+        if (recordBtnShowStop(s)) {
+            recordBtn->setText("停止录制");
+            recordBtn->setStyleSheet(
+                "QPushButton {"
+                "  padding:0 10px; font-size:12px;"
+                "  border:0.5px solid #a32d2d;"
+                "  border-radius:4px;"
+                "  background:#501313; color:#f09595;"
+                "}"
+                "QPushButton:hover  { background:#791f1f; }"
+                "QPushButton:pressed{ background:#a32d2d; }");
+        } else {
+            recordBtn->setText("开始录制");
+            recordBtn->setStyleSheet(
+                "QPushButton {"
+                "  padding:0 10px; font-size:12px;"
+                "  border:0.5px solid rgba(255,255,255,0.14);"
+                "  border-radius:4px;"
+                "  background:rgba(255,255,255,0.06); color:#c2c0b6;"
+                "}"
+                "QPushButton:hover  { background:rgba(255,255,255,0.11); }"
+                "QPushButton:pressed{ background:rgba(255,255,255,0.18); }");
+        }
     });
 
-    // ---- 暂停/恢复按钮逻辑 ----
-    bool paused = false;
-    QObject::connect(pauseBtn, &QPushButton::clicked, [&]() mutable {
-        bool ok = paused ? ctrl.resume() : ctrl.pause();
+    // ── 暂停按钮点击 ─────────────────────────────────────────────
+    // 读快照 → 发指令 → 成功才调 setRemotePaused()
+    // setRemotePaused 只改 remote_paused，不动 state，无竞态
+    QObject::connect(pauseBtn, &QPushButton::clicked, [&] {
+        const bool currently_paused = player.currentStatus().remote_paused;
+        const bool ok = currently_paused ? ctrl.resume() : ctrl.pause();
         if (ok) {
-            paused = !paused;
-            // 同步状态机（仅标记 remote_paused，不影响播放线程）
-            // 通过 setStatus 更新快照
+            player.setRemotePaused(!currently_paused);
         } else {
-            msgLabel->setText("控制指令发送失败");
+            msgLbl->setText(currently_paused ? "恢复指令发送失败" : "暂停指令发送失败");
         }
     });
 
-    // ---- 录制按钮逻辑 ----
-    bool recording = false;
-    QObject::connect(recordBtn, &QPushButton::clicked, [&]() mutable {
-        if (!recording) {
-            player.startRecord("C:/Users/dkw/Desktop/record.ts");
-            recording = true;
+    // ── 录制按钮点击 ─────────────────────────────────────────────
+    // 读快照中的 record_phase 判断方向，调用意图函数，立即 emit，不等底层
+    QObject::connect(recordBtn, &QPushButton::clicked, [&] {
+        const RecordPhase phase = player.currentStatus().record_phase;
+        if (phase == RecordPhase::Idle || phase == RecordPhase::StopRequested) {
+            player.requestStartRecord("C:/Users/dkw/Desktop/record.ts");
         } else {
-            player.stopRecord();
-            recording = false;
+            player.requestStopRecord();
         }
     });
 
-    // ---- 启动 ----
+    // ── 启动 ─────────────────────────────────────────────────────
     container.resize(1280, 800);
     container.show();
 
@@ -900,12 +1048,10 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, [&player]() {
-        player.stop();
-    });
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     [&player] { player.stop(); });
 
     int code = app.exec();
     player.stop();
     return code;
 }
-
