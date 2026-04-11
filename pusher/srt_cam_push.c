@@ -10,26 +10,52 @@
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <gst/video/video.h>
+#include <sys/stat.h>
 
 typedef struct {
-    gchar *device;
-    gchar *host;
+    const gchar *device_path;
+    const gchar *host;
     gint port;
     gint width;
     gint height;
     gint fps;
     gint bitrate_kbps;
     gint gop;
-    gchar *profile;   // baseline / main
-    gint srt_latency; // ms
+    const gchar *profile;   // baseline / main
+    gint srt_latency;       // ms
     gboolean audio_enabled;
-    gchar *audio_device;
+    const gchar *audio_device;
     gint audio_bitrate_kbps;
-    gchar *audio_codec; // aac | opus
-    gint ctrl_port;     // TCP control port for pause/resume
+    const gchar *audio_codec; // aac | opus
+    gint ctrl_port;           // TCP control port for pause/resume
 } AppConfig;
 
-static const gchar *kConfigGroup = "srt_cam_push";
+/*
+ * 唯一配置变量
+ * 这里直接绑定这只罗技摄像头的稳定 by-id 路径，不再依赖 /dev/videoN
+ */
+static const AppConfig kAppConfig = {
+    .device_path = "/dev/v4l/by-id/usb-046d_0825_1ED9E9C0-video-index0",
+    .host = "10.160.196.17",
+    .port = 9000,
+    .width = 1280,
+    .height = 720,
+    .fps = 25,
+    .bitrate_kbps = 2000,
+    .gop = 50,
+    .profile = "baseline",
+    .srt_latency = 120,
+    .audio_enabled = TRUE,
+    .audio_device = "plughw:3,0",
+    .audio_bitrate_kbps = 128,
+    .audio_codec = "aac",
+    .ctrl_port = 10090
+};
+
+static gboolean device_exists(const gchar *path) {
+    struct stat st;
+    return (path != NULL) && (stat(path, &st) == 0);
+}
 
 static gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data) {
     GMainLoop *loop = (GMainLoop *)data;
@@ -89,190 +115,6 @@ static gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data) {
     return TRUE;
 }
 
-static void config_init(AppConfig *cfg) {
-    cfg->device = g_strdup("/dev/video0");
-    cfg->host = g_strdup("127.0.0.1");
-    cfg->port = 9000;
-    cfg->width = 1280;
-    cfg->height = 720;
-    cfg->fps = 25;
-    cfg->bitrate_kbps = 2000;
-    cfg->gop = 50;           // 25fps * 2 sec
-    cfg->profile = g_strdup("baseline");
-    cfg->srt_latency = 120;  // ms
-    cfg->audio_enabled = TRUE;
-    cfg->audio_device = g_strdup("hw:0");
-    cfg->audio_bitrate_kbps = 128;
-    cfg->audio_codec = g_strdup("aac");
-    cfg->ctrl_port = 10090;
-}
-
-static void config_free(AppConfig *cfg) {
-    g_free(cfg->device);
-    g_free(cfg->host);
-    g_free(cfg->profile);
-    g_free(cfg->audio_device);
-    g_free(cfg->audio_codec);
-}
-
-static gboolean load_config_file(const gchar *path, AppConfig *cfg, GError **error) {
-    GKeyFile *kf = g_key_file_new();
-    gboolean ok = g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, error);
-    if (!ok) {
-        g_key_file_unref(kf);
-        return FALSE;
-    }
-
-    if (!g_key_file_has_group(kf, kConfigGroup)) {
-        g_set_error(error,
-                    g_quark_from_static_string("srt-cam-push"),
-                    1,
-                    "Missing [%s] section in config file: %s",
-                    kConfigGroup,
-                    path);
-        g_key_file_unref(kf);
-        return FALSE;
-    }
-
-    if (g_key_file_has_key(kf, kConfigGroup, "device", NULL)) {
-        gchar *v = g_key_file_get_string(kf, kConfigGroup, "device", NULL);
-        g_free(cfg->device);
-        cfg->device = v;
-    }
-    if (g_key_file_has_key(kf, kConfigGroup, "host", NULL)) {
-        gchar *v = g_key_file_get_string(kf, kConfigGroup, "host", NULL);
-        g_free(cfg->host);
-        cfg->host = v;
-    }
-    if (g_key_file_has_key(kf, kConfigGroup, "profile", NULL)) {
-        gchar *v = g_key_file_get_string(kf, kConfigGroup, "profile", NULL);
-        g_free(cfg->profile);
-        cfg->profile = v;
-    }
-
-    if (g_key_file_has_key(kf, kConfigGroup, "port", NULL))
-        cfg->port = g_key_file_get_integer(kf, kConfigGroup, "port", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "width", NULL))
-        cfg->width = g_key_file_get_integer(kf, kConfigGroup, "width", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "height", NULL))
-        cfg->height = g_key_file_get_integer(kf, kConfigGroup, "height", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "fps", NULL))
-        cfg->fps = g_key_file_get_integer(kf, kConfigGroup, "fps", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "bitrate", NULL))
-        cfg->bitrate_kbps = g_key_file_get_integer(kf, kConfigGroup, "bitrate", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "gop", NULL))
-        cfg->gop = g_key_file_get_integer(kf, kConfigGroup, "gop", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "latency", NULL))
-        cfg->srt_latency = g_key_file_get_integer(kf, kConfigGroup, "latency", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "audio", NULL))
-        cfg->audio_enabled = g_key_file_get_boolean(kf, kConfigGroup, "audio", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "audio_device", NULL)) {
-        gchar *v = g_key_file_get_string(kf, kConfigGroup, "audio_device", NULL);
-        g_free(cfg->audio_device);
-        cfg->audio_device = v;
-    }
-    if (g_key_file_has_key(kf, kConfigGroup, "audio_bitrate", NULL))
-        cfg->audio_bitrate_kbps = g_key_file_get_integer(kf, kConfigGroup, "audio_bitrate", NULL);
-    if (g_key_file_has_key(kf, kConfigGroup, "audio_codec", NULL)) {
-        gchar *v = g_key_file_get_string(kf, kConfigGroup, "audio_codec", NULL);
-        g_free(cfg->audio_codec);
-        cfg->audio_codec = v;
-    }
-    if (g_key_file_has_key(kf, kConfigGroup, "ctrl_port", NULL))
-        cfg->ctrl_port = g_key_file_get_integer(kf, kConfigGroup, "ctrl_port", NULL);
-
-    g_key_file_unref(kf);
-    return TRUE;
-}
-
-static const gchar *find_config_path_arg(int argc, char **argv) {
-    const gchar *path = NULL;
-    for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "--config")) {
-            if (i + 1 >= argc) {
-                return NULL;
-            }
-            path = argv[i + 1];
-            ++i;
-        }
-    }
-    return path;
-}
-
-static gboolean parse_args(int argc, char **argv, AppConfig *cfg) {
-    for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "--config") && i + 1 < argc) {
-            ++i; // already loaded earlier; keep for CLI compatibility
-        } else if (!strcmp(argv[i], "--device") && i + 1 < argc) {
-            g_free(cfg->device);
-            cfg->device = g_strdup(argv[++i]);
-        } else if (!strcmp(argv[i], "--host") && i + 1 < argc) {
-            g_free(cfg->host);
-            cfg->host = g_strdup(argv[++i]);
-        } else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
-            cfg->port = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--width") && i + 1 < argc) {
-            cfg->width = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--height") && i + 1 < argc) {
-            cfg->height = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--fps") && i + 1 < argc) {
-            cfg->fps = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--bitrate") && i + 1 < argc) {
-            cfg->bitrate_kbps = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--gop") && i + 1 < argc) {
-            cfg->gop = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--profile") && i + 1 < argc) {
-            g_free(cfg->profile);
-            cfg->profile = g_strdup(argv[++i]);
-        } else if (!strcmp(argv[i], "--latency") && i + 1 < argc) {
-            cfg->srt_latency = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--no-audio")) {
-            cfg->audio_enabled = FALSE;
-        } else if (!strcmp(argv[i], "--audio-device") && i + 1 < argc) {
-            g_free(cfg->audio_device);
-            cfg->audio_device = g_strdup(argv[++i]);
-        } else if (!strcmp(argv[i], "--audio-bitrate") && i + 1 < argc) {
-            cfg->audio_bitrate_kbps = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--audio-codec") && i + 1 < argc) {
-            g_free(cfg->audio_codec);
-            cfg->audio_codec = g_strdup(argv[++i]);
-        } else if (!strcmp(argv[i], "--ctrl-port") && i + 1 < argc) {
-            cfg->ctrl_port = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--help")) {
-            return FALSE;
-        } else {
-            g_printerr("Unknown arg: %s\n", argv[i]);
-            return FALSE;
-        }
-    }
-    return TRUE;
-}
-
-static void print_usage(const char *prog) {
-    g_print(
-        "Usage:\n"
-        "  %s [options]\n\n"
-        "Options:\n"
-        "  --config   ./srt_cam_push.conf\n"
-        "  --device   /dev/video0\n"
-        "  --host     127.0.0.1\n"
-        "  --port     9000\n"
-        "  --width    1280\n"
-        "  --height   720\n"
-        "  --fps      25\n"
-        "  --bitrate  2000       (kbps)\n"
-        "  --gop      50         (frames)\n"
-        "  --profile  baseline   (baseline|main)\n"
-        "  --latency  120        (ms)\n"
-        "  --no-audio            disable audio capture\n"
-        "  --audio-device hw:0   ALSA device (alsasrc)\n"
-        "  --audio-bitrate 128   (kbps)\n"
-        "  --audio-codec aac     (aac|opus)\n"
-        "  --ctrl-port 10090     TCP control port (PAUSE/RESUME)\n",
-        prog
-    );
-}
-
 // -------- Control server: accepts PAUSE/RESUME over TCP --------
 typedef struct {
     GstElement *pipeline;
@@ -291,6 +133,7 @@ static void *control_thread(void *arg) {
         g_printerr("control: socket failed\n");
         return NULL;
     }
+
     int yes = 1;
     setsockopt(cs->listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
@@ -298,6 +141,7 @@ static void *control_thread(void *arg) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons((uint16_t)cs->ctrl_port);
+
     if (bind(cs->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
         listen(cs->listen_fd, 4) < 0) {
         g_printerr("control: bind/listen failed\n");
@@ -311,8 +155,10 @@ static void *control_thread(void *arg) {
         FD_ZERO(&rfds);
         FD_SET(cs->listen_fd, &rfds);
         struct timeval tv = {1, 0};
+
         int rv = select(cs->listen_fd + 1, &rfds, NULL, NULL, &tv);
         if (rv <= 0) continue;
+
         int client = accept(cs->listen_fd, NULL, NULL);
         if (client < 0) continue;
 
@@ -320,7 +166,6 @@ static void *control_thread(void *arg) {
         ssize_t n = recv(client, buf, sizeof(buf) - 1, 0);
         if (n > 0) {
             if (!g_ascii_strncasecmp(buf, "PAUSE", 5)) {
-                // Switch selectors to black/silence (sink_1).
                 if (cs->vsel) {
                     GstPad *pad = gst_element_get_static_pad(cs->vsel, "sink_1");
                     g_object_set(cs->vsel, "active-pad", pad, NULL);
@@ -333,32 +178,37 @@ static void *control_thread(void *arg) {
                 }
                 send(client, "OK\n", 3, 0);
             } else if (!g_ascii_strncasecmp(buf, "RESUME", 6)) {
-                // Switch back to live (sink_0) and force an immediate keyframe.
                 if (cs->vsel) {
                     GstPad *pad0 = gst_element_get_static_pad(cs->vsel, "sink_0");
                     g_object_set(cs->vsel, "active-pad", pad0, NULL);
                     gst_object_unref(pad0);
-                    GstStructure *s = gst_structure_new("GstForceKeyUnit",
-                                                        "all-headers", G_TYPE_BOOLEAN, TRUE,
-                                                        "count", G_TYPE_UINT, 0,
-                                                        "timestamp", G_TYPE_UINT64, GST_CLOCK_TIME_NONE,
-                                                        "stream-time", G_TYPE_UINT64, GST_CLOCK_TIME_NONE,
-                                                        NULL);
+
+                    GstStructure *s = gst_structure_new(
+                        "GstForceKeyUnit",
+                        "all-headers", G_TYPE_BOOLEAN, TRUE,
+                        "count", G_TYPE_UINT, 0,
+                        "timestamp", G_TYPE_UINT64, GST_CLOCK_TIME_NONE,
+                        "stream-time", G_TYPE_UINT64, GST_CLOCK_TIME_NONE,
+                        NULL
+                    );
                     GstEvent *force_kf = gst_event_new_custom(GST_EVENT_CUSTOM_UPSTREAM, s);
                     GstPad *src = gst_element_get_static_pad(cs->vsel, "src");
                     gst_pad_send_event(src, force_kf);
                     gst_object_unref(src);
                 }
+
                 if (cs->asel) {
                     GstPad *pad0 = gst_element_get_static_pad(cs->asel, "sink_0");
                     g_object_set(cs->asel, "active-pad", pad0, NULL);
                     gst_object_unref(pad0);
                 }
+
                 send(client, "OK\n", 3, 0);
             } else {
                 send(client, "UNKNOWN\n", 8, 0);
             }
         }
+
         close(client);
     }
 
@@ -372,6 +222,7 @@ static gboolean start_control_server(ControlServer *cs, GstElement *pipeline, gi
     cs->ctrl_port = port;
     cs->stop = FALSE;
     cs->listen_fd = -1;
+
     if (pthread_create(&cs->thread, NULL, control_thread, cs) != 0) {
         g_printerr("control: failed to create thread\n");
         return FALSE;
@@ -381,12 +232,15 @@ static gboolean start_control_server(ControlServer *cs, GstElement *pipeline, gi
 
 static void stop_control_server(ControlServer *cs) {
     cs->stop = TRUE;
+
     if (cs->listen_fd >= 0) {
         close(cs->listen_fd);
     }
+
     if (cs->thread) {
         pthread_join(cs->thread, NULL);
     }
+
     if (cs->vsel) gst_object_unref(cs->vsel);
     if (cs->asel) gst_object_unref(cs->asel);
 }
@@ -398,41 +252,29 @@ int main(int argc, char *argv[]) {
     GError *error = NULL;
     ControlServer ctrl = {0};
 
-    AppConfig cfg;
-    config_init(&cfg);
+    const AppConfig *cfg = &kAppConfig;
 
     gst_init(&argc, &argv);
 
-    const gchar *config_path = find_config_path_arg(argc, argv);
-    if (config_path != NULL) {
-        if (!load_config_file(config_path, &cfg, &error)) {
-            g_printerr("Failed to load config file %s: %s\n",
-                       config_path,
-                       error ? error->message : "unknown");
-            g_clear_error(&error);
-            config_free(&cfg);
-            return 1;
-        }
-    }
-
-    if (!parse_args(argc, argv, &cfg)) {
-        print_usage(argv[0]);
-        config_free(&cfg);
+    if (!device_exists(cfg->device_path)) {
+        g_printerr("Camera device path not found: %s\n", cfg->device_path);
+        g_printerr("Check whether the Logitech camera is connected and by-id link exists.\n");
         return 1;
     }
 
+    g_print("Using camera device: %s\n", cfg->device_path);
+
     GString *pipeline_desc = g_string_new(NULL);
-    // First, connect mux output to SRT sink.
+
     g_string_append_printf(
         pipeline_desc,
         "mpegtsmux name=mux alignment=7 ! queue ! "
         "srtclientsink uri=\"srt://%s:%d?mode=caller&latency=%d\" ",
-        cfg.host,
-        cfg.port,
-        cfg.srt_latency
+        cfg->host,
+        cfg->port,
+        cfg->srt_latency
     );
 
-    // Video branch with selector (live vs black).
     g_string_append_printf(
         pipeline_desc,
         "input-selector name=vsel sync-streams=true ! "
@@ -440,9 +282,9 @@ int main(int argc, char *argv[]) {
         "bitrate=%d key-int-max=%d bframes=0 byte-stream=true ! "
         "video/x-h264,profile=%s ! "
         "h264parse config-interval=-1 ! queue ! mux. ",
-        cfg.bitrate_kbps,
-        cfg.gop,
-        cfg.profile
+        cfg->bitrate_kbps,
+        cfg->gop,
+        cfg->profile
     );
 
     g_string_append_printf(
@@ -452,13 +294,13 @@ int main(int argc, char *argv[]) {
         "jpegdec ! videoconvert ! "
         "video/x-raw,width=%d,height=%d,framerate=%d/1 ! "
         "queue ! vsel.sink_0 ",
-        cfg.device,
-        cfg.width,
-        cfg.height,
-        cfg.fps,
-        cfg.width,
-        cfg.height,
-        cfg.fps
+        cfg->device_path,
+        cfg->width,
+        cfg->height,
+        cfg->fps,
+        cfg->width,
+        cfg->height,
+        cfg->fps
     );
 
     g_string_append_printf(
@@ -466,21 +308,22 @@ int main(int argc, char *argv[]) {
         "videotestsrc pattern=black is-live=true ! "
         "video/x-raw,width=%d,height=%d,framerate=%d/1 ! "
         "queue ! vsel.sink_1 ",
-        cfg.width,
-        cfg.height,
-        cfg.fps
+        cfg->width,
+        cfg->height,
+        cfg->fps
     );
 
-    if (cfg.audio_enabled) {
-        gint audio_bps = cfg.audio_bitrate_kbps * 1000;
-        if (g_strcmp0(cfg.audio_codec, "opus") == 0) {
+    if (cfg->audio_enabled) {
+        gint audio_bps = cfg->audio_bitrate_kbps * 1000;
+
+        if (g_strcmp0(cfg->audio_codec, "opus") == 0) {
             g_string_append_printf(
                 pipeline_desc,
                 " input-selector name=asel sync-streams=true ! queue ! "
                 "opusenc bitrate=%d frame-size=20 ! queue ! mux. ",
                 audio_bps
             );
-        } else { // default: aac
+        } else {
             g_string_append_printf(
                 pipeline_desc,
                 " input-selector name=asel sync-streams=true ! queue ! "
@@ -490,13 +333,15 @@ int main(int argc, char *argv[]) {
         }
 
         int audio_rate = 48000;
+
         g_string_append_printf(
             pipeline_desc,
             " alsasrc device=%s ! audioresample ! audioconvert ! "
             "audio/x-raw,rate=%d,channels=2 ! queue ! asel.sink_0 ",
-            cfg.audio_device,
+            cfg->audio_device,
             audio_rate
         );
+
         g_string_append_printf(
             pipeline_desc,
             " audiotestsrc wave=silence is-live=true ! audioresample ! audioconvert ! "
@@ -516,7 +361,6 @@ int main(int argc, char *argv[]) {
         g_printerr("Failed to create pipeline: %s\n",
                    error ? error->message : "unknown");
         g_clear_error(&error);
-        config_free(&cfg);
         return 2;
     }
 
@@ -531,16 +375,15 @@ int main(int argc, char *argv[]) {
         gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(pipeline);
         g_main_loop_unref(loop);
-        config_free(&cfg);
         return 3;
     }
 
     g_print("Streaming started.\n");
 
-    if (!start_control_server(&ctrl, pipeline, cfg.ctrl_port)) {
+    if (!start_control_server(&ctrl, pipeline, cfg->ctrl_port)) {
         g_printerr("Warning: control server not running\n");
     } else {
-        g_print("Control server listening on %d (PAUSE/RESUME)\n", cfg.ctrl_port);
+        g_print("Control server listening on %d (PAUSE/RESUME)\n", cfg->ctrl_port);
     }
 
     g_main_loop_run(loop);
@@ -552,7 +395,6 @@ int main(int argc, char *argv[]) {
     gst_object_unref(bus);
     gst_object_unref(pipeline);
     g_main_loop_unref(loop);
-    config_free(&cfg);
 
     return 0;
 }

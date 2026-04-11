@@ -563,6 +563,7 @@ public:
 
     void stop() {
         std::thread worker_to_join;
+        bool should_set_stopped = false;
 
         {
             std::lock_guard<std::mutex> lk(lifecycleMutex_);
@@ -595,10 +596,17 @@ public:
             lifecycleState_ = LifecycleState::Stopped;
         }
 
-        mutateStatus([&](PlayerStatus& s) {
-            s.state   = PlayerState::Stopped;
-            s.message = "已停止";
-        });
+        {
+            std::lock_guard<std::mutex> lk(statusMutex_);
+            should_set_stopped = (status_.state != PlayerState::Error);
+        }
+
+        if (should_set_stopped) {
+            mutateStatus([&](PlayerStatus& s) {
+                s.state   = PlayerState::Stopped;
+                s.message = "已停止";
+            });
+        }
     }
 
     LifecycleState lifecycleState() const {
@@ -876,7 +884,7 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
 
-        setPlaybackStatus(PlayerState::Stopped, PlayerErrorCode::None, "播放线程已退出");
+        //setPlaybackStatus(PlayerState::Stopped, PlayerErrorCode::None, "播放线程已退出");
     }
 
 private:
