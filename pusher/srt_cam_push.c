@@ -120,11 +120,164 @@ typedef struct {
     GstElement *pipeline;
     GstElement *vsel;
     GstElement *asel;
+
+    GstElement *venc;    // x264enc
+    GstElement *vparse;  // h264parse
+
     gint ctrl_port;
     pthread_t thread;
     int listen_fd;
     gboolean stop;
+
+    gint64 last_resume_monotonic_us; // lastest RESUME time, in monotonic microseconds
 } ControlServer;
+
+static gboolean is_force_key_unit_event(GstEvent *ev) {
+    if (!ev) return FALSE;
+    return gst_video_event_is_force_key_unit(ev);
+}
+
+static GstPadProbeReturn event_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    if (!(GST_PAD_PROBE_INFO_TYPE(info) &
+          (GST_PAD_PROBE_TYPE_EVENT_UPSTREAM | GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM))) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    GstEvent *ev = GST_PAD_PROBE_INFO_EVENT(info);
+    if (!ev || !is_force_key_unit_event(ev)) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    GstElement *parent = gst_pad_get_parent_element(pad);
+    const gchar *parent_name = parent ? GST_OBJECT_NAME(parent) : "?";
+    const gchar *pad_name = GST_PAD_NAME(pad);
+    GstEventType type = GST_EVENT_TYPE(ev);
+
+    if (type == GST_EVENT_CUSTOM_UPSTREAM) {
+        GstClockTime running_time = GST_CLOCK_TIME_NONE;
+        gboolean all_headers = FALSE;
+        guint count = 0;
+
+        if (gst_video_event_parse_upstream_force_key_unit(
+                ev, &running_time, &all_headers, &count)) {
+            g_print("[FKU][EVENT][UP] elem=%s pad=%s running=%" GST_TIME_FORMAT
+                    " all_headers=%d count=%u\n",
+                    parent_name,
+                    pad_name,
+                    GST_TIME_ARGS(running_time),
+                    all_headers,
+                    count);
+        } else {
+            g_print("[FKU][EVENT][UP] elem=%s pad=%s parse_failed\n",
+                    parent_name,
+                    pad_name);
+        }
+    } else if (type == GST_EVENT_CUSTOM_DOWNSTREAM ||
+               type == GST_EVENT_CUSTOM_DOWNSTREAM_OOB) {
+        GstClockTime timestamp = GST_CLOCK_TIME_NONE;
+        GstClockTime stream_time = GST_CLOCK_TIME_NONE;
+        GstClockTime running_time = GST_CLOCK_TIME_NONE;
+        gboolean all_headers = FALSE;
+        guint count = 0;
+
+        if (gst_video_event_parse_downstream_force_key_unit(
+                ev, &timestamp, &stream_time, &running_time, &all_headers, &count)) {
+            g_print("[FKU][EVENT][DOWN] elem=%s pad=%s ts=%" GST_TIME_FORMAT
+                    " stream=%" GST_TIME_FORMAT
+                    " running=%" GST_TIME_FORMAT
+                    " all_headers=%d count=%u\n",
+                    parent_name,
+                    pad_name,
+                    GST_TIME_ARGS(timestamp),
+                    GST_TIME_ARGS(stream_time),
+                    GST_TIME_ARGS(running_time),
+                    all_headers,
+                    count);
+        } else {
+            g_print("[FKU][EVENT][DOWN] elem=%s pad=%s parse_failed\n",
+                    parent_name,
+                    pad_name);
+        }
+    } else {
+        g_print("[FKU][EVENT] elem=%s pad=%s type=%s\n",
+                parent_name,
+                pad_name,
+                GST_EVENT_TYPE_NAME(ev));
+    }
+
+    if (parent) gst_object_unref(parent);
+    return GST_PAD_PROBE_OK;
+}
+
+static GstPadProbeReturn buffer_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    ControlServer *cs = (ControlServer *)user_data;
+
+    if (!(GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER)) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (!buf) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    if (cs->last_resume_monotonic_us <= 0) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    gint64 now_us = g_get_monotonic_time();
+    gint64 delta_us = now_us - cs->last_resume_monotonic_us;;
+
+
+    gboolean is_delta = GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT);
+    gboolean is_header = GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_HEADER);
+
+
+    if (delta_us >= 0 && delta_us <= 200000) {
+        GstElement *parent = gst_pad_get_parent_element(pad);
+        const gchar *parent_name = parent ? GST_OBJECT_NAME(parent) : "?";
+
+        g_print("[FKU][BUF] elem=%s pad=%s since_resume=%" G_GINT64_FORMAT " ms "
+                "pts=%" GST_TIME_FORMAT " delta=%d header=%d size=%zu\n",
+                parent_name,
+                GST_PAD_NAME(pad),
+                delta_us / 1000,
+                GST_TIME_ARGS(GST_BUFFER_PTS(buf)),
+                is_delta,
+                is_header,
+                gst_buffer_get_size(buf));
+
+        if (!is_delta) {
+            g_print("[FKU][BUF] >>> non-delta frame seen within 200ms after RESUME\n");
+        }
+
+        if (parent) gst_object_unref(parent);
+    }
+
+    return GST_PAD_PROBE_OK;
+}
+
+static void add_probe_to_pad(GstElement *elem,
+                             const gchar *pad_name,
+                             GstPadProbeType probe_type,
+                             GstPadProbeCallback cb,
+                             gpointer user_data) {
+    if (!elem) {
+        g_printerr("probe: element is NULL for pad %s\n", pad_name);
+        return;
+    }
+
+    GstPad *pad = gst_element_get_static_pad(elem, pad_name);
+    if (!pad) {
+        g_printerr("probe: failed to get %s:%s\n",
+                   GST_OBJECT_NAME(elem), pad_name);
+        return;
+    }
+
+    gst_pad_add_probe(pad, probe_type, cb, user_data, NULL);
+    g_print("probe attached: %s:%s\n", GST_OBJECT_NAME(elem), pad_name);
+    gst_object_unref(pad);
+}
 
 static void *control_thread(void *arg) {
     ControlServer *cs = (ControlServer *)arg;
@@ -180,31 +333,52 @@ static void *control_thread(void *arg) {
             } else if (!g_ascii_strncasecmp(buf, "RESUME", 6)) {
                 if (cs->vsel) {
                     GstPad *pad0 = gst_element_get_static_pad(cs->vsel, "sink_0");
-                    g_object_set(cs->vsel, "active-pad", pad0, NULL);
-                    gst_object_unref(pad0);
+                    if (pad0) {
+                        g_object_set(cs->vsel, "active-pad", pad0, NULL);
+                        gst_object_unref(pad0);
+                        g_print("[CTRL] vsel switched to sink_0\n");
+                    } else {
+                        g_printerr("[CTRL] failed to get vsel:sink_0\n");
+                    }
 
-                    GstStructure *s = gst_structure_new(
-                        "GstForceKeyUnit",
-                        "all-headers", G_TYPE_BOOLEAN, TRUE,
-                        "count", G_TYPE_UINT, 0,
-                        "timestamp", G_TYPE_UINT64, GST_CLOCK_TIME_NONE,
-                        "stream-time", G_TYPE_UINT64, GST_CLOCK_TIME_NONE,
-                        NULL
-                    );
-                    GstEvent *force_kf = gst_event_new_custom(GST_EVENT_CUSTOM_UPSTREAM, s);
-                    GstPad *src = gst_element_get_static_pad(cs->vsel, "src");
-                    gst_pad_send_event(src, force_kf);
-                    gst_object_unref(src);
+                    GstPad *src = NULL;
+
+                    if (cs->vparse) {
+                        src = gst_element_get_static_pad(cs->vparse, "src");
+                    }
+
+                    if (src) {
+                        cs->last_resume_monotonic_us = g_get_monotonic_time();
+
+                        GstEvent *force_kf =
+                            gst_video_event_new_upstream_force_key_unit(
+                                GST_CLOCK_TIME_NONE,
+                                TRUE,
+                                0
+                            );
+
+                        gboolean ok = gst_pad_send_event(src, force_kf);
+                        g_print("[CTRL] upstream force-key-unit sent from vparse:src result=%d\n", ok);
+
+                        gst_object_unref(src);
+                    } else {
+                        g_printerr("[CTRL] failed to get vparse:src\n");
+                    }
                 }
 
                 if (cs->asel) {
                     GstPad *pad0 = gst_element_get_static_pad(cs->asel, "sink_0");
-                    g_object_set(cs->asel, "active-pad", pad0, NULL);
-                    gst_object_unref(pad0);
+                    if (pad0) {
+                        g_object_set(cs->asel, "active-pad", pad0, NULL);
+                        gst_object_unref(pad0);
+                        g_print("[CTRL] asel switched to sink_0\n");
+                    } else {
+                        g_printerr("[CTRL] failed to get asel:sink_0\n");
+                    }
                 }
 
                 send(client, "OK\n", 3, 0);
-            } else {
+            }else {
                 send(client, "UNKNOWN\n", 8, 0);
             }
         }
@@ -215,13 +389,56 @@ static void *control_thread(void *arg) {
     return NULL;
 }
 
+static void install_video_debug_probes(ControlServer *cs) {
+    if (!cs || !cs->vsel || !cs->venc || !cs->vparse) {
+        g_printerr("probe: missing elements, skip install\n");
+        return;
+    }
+
+    add_probe_to_pad(cs->vsel, "src",
+                     GST_PAD_PROBE_TYPE_EVENT_UPSTREAM |
+                     GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                     event_probe_cb, cs);
+
+    add_probe_to_pad(cs->vsel, "sink_0",
+                     GST_PAD_PROBE_TYPE_EVENT_UPSTREAM |
+                     GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                     event_probe_cb, cs);
+
+    add_probe_to_pad(cs->venc, "sink",
+                     GST_PAD_PROBE_TYPE_EVENT_UPSTREAM |
+                     GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                     event_probe_cb, cs);
+
+    add_probe_to_pad(cs->venc, "src",
+                     GST_PAD_PROBE_TYPE_EVENT_UPSTREAM |
+                     GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                     event_probe_cb, cs);
+
+    add_probe_to_pad(cs->vparse, "sink",
+                     GST_PAD_PROBE_TYPE_EVENT_UPSTREAM |
+                     GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                     event_probe_cb, cs);
+
+    add_probe_to_pad(cs->vparse, "src",
+                     GST_PAD_PROBE_TYPE_EVENT_UPSTREAM |
+                     GST_PAD_PROBE_TYPE_BUFFER,
+                     buffer_probe_cb, cs);
+}
+
 static gboolean start_control_server(ControlServer *cs, GstElement *pipeline, gint port) {
     cs->pipeline = pipeline;
     cs->vsel = gst_bin_get_by_name(GST_BIN(pipeline), "vsel");
     cs->asel = gst_bin_get_by_name(GST_BIN(pipeline), "asel");
+    cs->venc = gst_bin_get_by_name(GST_BIN(pipeline), "venc");
+    cs->vparse = gst_bin_get_by_name(GST_BIN(pipeline), "vparse");
+
     cs->ctrl_port = port;
     cs->stop = FALSE;
     cs->listen_fd = -1;
+    cs->last_resume_monotonic_us = 0;
+
+    install_video_debug_probes(cs);
 
     if (pthread_create(&cs->thread, NULL, control_thread, cs) != 0) {
         g_printerr("control: failed to create thread\n");
@@ -243,6 +460,8 @@ static void stop_control_server(ControlServer *cs) {
 
     if (cs->vsel) gst_object_unref(cs->vsel);
     if (cs->asel) gst_object_unref(cs->asel);
+    if (cs->venc) gst_object_unref(cs->venc);
+    if (cs->vparse) gst_object_unref(cs->vparse);
 }
 
 int main(int argc, char *argv[]) {
@@ -278,10 +497,10 @@ int main(int argc, char *argv[]) {
     g_string_append_printf(
         pipeline_desc,
         "input-selector name=vsel sync-streams=true ! "
-        "x264enc tune=zerolatency speed-preset=veryfast "
+        "x264enc name=venc tune=zerolatency speed-preset=veryfast "
         "bitrate=%d key-int-max=%d bframes=0 byte-stream=true ! "
         "video/x-h264,profile=%s ! "
-        "h264parse config-interval=-1 ! queue ! mux. ",
+        "h264parse name=vparse config-interval=-1 ! queue ! mux. ",
         cfg->bitrate_kbps,
         cfg->gop,
         cfg->profile
