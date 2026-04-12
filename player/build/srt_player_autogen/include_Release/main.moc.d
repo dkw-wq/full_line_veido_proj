@@ -2,6 +2,7 @@ C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/build/srt_player_autogen/incl
   C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/ControlClient.h \
   C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/D3D11Renderer.h \
   C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/Recorder.h \
+  C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/player/telemetry.h \
   D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/QCoreApplication \
   D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/QMetaType \
   D:/vcpkg/installed/x64-windows/include/Qt6/QtCore/QObject \

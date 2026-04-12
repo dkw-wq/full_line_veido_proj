@@ -1,3 +1,4 @@
+<!-- SRT Relay Dashboard -->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -103,6 +104,7 @@
     border-radius: 100px;
     font-size: 12px;
     font-weight: 500;
+    white-space: nowrap;
   }
   .badge-green  { background: var(--green-bg);  color: var(--green-text); }
   .badge-red    { background: var(--red-bg);    color: var(--red-text); }
@@ -131,7 +133,9 @@
     gap: 10px;
     margin-bottom: 16px;
   }
-  @media (max-width: 720px) { .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 720px) {
+    .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
 
   .metric-card {
     background: var(--bg2);
@@ -203,6 +207,10 @@
   tr:last-child td { border-bottom: none; }
   .mono { font-family: ui-monospace, monospace; font-size: 12px; }
   .muted { color: var(--text3); }
+
+  #sub-table-wrap {
+    overflow-x: auto;
+  }
 
   #no-subs {
     padding: 16px 0;
@@ -291,6 +299,25 @@
   </div>
 </div>
 
+<div class="grid-4" style="margin-bottom:16px">
+  <div class="metric-card">
+    <div class="label">Telemetry RTT</div>
+    <div class="value" id="m-trtt">—<span class="unit">ms</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">单向估计</div>
+    <div class="value" id="m-toneway">—<span class="unit">ms</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">显示延迟(预留)</div>
+    <div class="value" id="m-present">—<span class="unit">ms</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">ACK 新鲜度</div>
+    <div class="value" id="m-ackfresh">—</div>
+  </div>
+</div>
+
 <div class="card">
   <div class="legend">
     <span><span class="legend-dot" style="background:#378add"></span>入流 Mbps</span>
@@ -332,7 +359,7 @@ function fmt(n, dec=2) {
 }
 
 function fmtMs(ms) {
-  if (ms < 0) return '—';
+  if (ms == null || isNaN(ms) || ms < 0) return '—';
   if (ms < 1000) return ms + 'ms';
   return (ms / 1000).toFixed(1) + 's';
 }
@@ -395,9 +422,7 @@ function initChart() {
         }
       },
       scales: {
-        x: {
-          display: false,
-        },
+        x: { display: false },
         y: {
           beginAtZero: true,
           grid: { color: gridColor, lineWidth: 0.5 },
@@ -416,9 +441,7 @@ function initChart() {
 
 function updateChart(inHist, outHist) {
   if (!chart) return;
-  const len = Math.max(inHist.length, outHist.length, 1);
   const pad = n => Array(Math.max(0, MAX_HIST - n)).fill(null);
-
   chart.data.datasets[0].data = [...pad(inHist.length), ...inHist];
   chart.data.datasets[1].data = [...pad(outHist.length), ...outHist];
   chart.update('none');
@@ -430,21 +453,41 @@ function renderSubs(list) {
     wrap.innerHTML = '<div id="no-subs">暂无拉流端</div>';
     return;
   }
+
   let html = '<table><thead><tr>'
-    + '<th>ID</th><th>地址</th><th>已发送</th><th>延迟</th><th>队列深度</th><th>空闲</th>'
+    + '<th>ID</th>'
+    + '<th>地址</th>'
+    + '<th>已发送</th>'
+    + '<th>SRT Latency</th>'
+    + '<th>ACK RTT</th>'
+    + '<th>单向估计</th>'
+    + '<th>显示延迟(预留)</th>'
+    + '<th>队列深度</th>'
+    + '<th>ACK 新鲜度</th>'
+    + '<th>空闲</th>'
     + '</tr></thead><tbody>';
+
   for (const s of list) {
     const idle = s.idle_ms;
     const idleCls = idle > 3000 ? 'badge badge-amber' : 'badge badge-green';
+    const ackFreshCls = (s.telemetry_last_ack_ms != null && s.telemetry_last_ack_ms >= 0 && s.telemetry_last_ack_ms < 3000)
+      ? 'badge badge-green'
+      : 'badge badge-gray';
+
     html += `<tr>
       <td class="mono muted">#${s.id}</td>
       <td class="mono">${s.peer}</td>
       <td>${fmt(s.sent_mb, 1)} MB</td>
       <td><span class="badge badge-blue">${s.latency_ms < 0 ? '?' : s.latency_ms} ms</span></td>
+      <td><span class="badge badge-green">${(s.telemetry_rtt_ms != null && s.telemetry_rtt_ms >= 0) ? fmt(s.telemetry_rtt_ms, 2) + ' ms' : '—'}</span></td>
+      <td><span class="badge badge-amber">${(s.telemetry_oneway_ms != null && s.telemetry_oneway_ms >= 0) ? fmt(s.telemetry_oneway_ms, 2) + ' ms' : '—'}</span></td>
+      <td><span class="badge badge-gray">—</span></td>
       <td>${s.q}</td>
+      <td><span class="${ackFreshCls}">${fmtMs(s.telemetry_last_ack_ms)}</span></td>
       <td><span class="${idleCls}">${fmtMs(idle)}</span></td>
     </tr>`;
   }
+
   html += '</tbody></table>';
   wrap.innerHTML = html;
 }
@@ -455,7 +498,6 @@ function handleMsg(data) {
 
   $('last-update').textContent = '更新于 ' + (d.wall_time || '');
 
-  // 推流端状态
   const pubEl = $('m-pub');
   if (d.pub_online) {
     pubEl.innerHTML = '<span class="badge badge-green">在线</span>';
@@ -464,10 +506,10 @@ function handleMsg(data) {
   }
 
   $('m-subs').textContent = d.subscribers ?? '—';
-  $('m-in').innerHTML  = fmt(d.ingress_mbps) + '<span class="unit">Mbps</span>';
-  $('m-out').innerHTML = fmt(d.egress_mbps)  + '<span class="unit">Mbps</span>';
+  $('m-in').innerHTML   = fmt(d.ingress_mbps) + '<span class="unit">Mbps</span>';
+  $('m-out').innerHTML  = fmt(d.egress_mbps) + '<span class="unit">Mbps</span>';
   $('m-tin').innerHTML  = fmt(d.total_ingress_mb, 1) + '<span class="unit">MB</span>';
-  $('m-tout').innerHTML = fmt(d.total_egress_mb,  1) + '<span class="unit">MB</span>';
+  $('m-tout').innerHTML = fmt(d.total_egress_mb, 1) + '<span class="unit">MB</span>';
 
   const discEl = $('m-disc');
   discEl.textContent = d.ts_disc ?? '—';
@@ -477,6 +519,11 @@ function handleMsg(data) {
   dropEl.textContent = d.queue_drops ?? '—';
   dropEl.style.color = (d.queue_drops > 0) ? 'var(--red)' : 'var(--green)';
 
+  $('m-trtt').innerHTML    = fmt(d.dash_rtt_ms, 2) + '<span class="unit">ms</span>';
+  $('m-toneway').innerHTML = fmt(d.dash_oneway_ms, 2) + '<span class="unit">ms</span>';
+  $('m-present').innerHTML = '—<span class="unit">ms</span>';
+  $('m-ackfresh').textContent = fmtMs(d.dash_ack_fresh_ms);
+
   updateChart(d.ingress_hist || [], d.egress_hist || []);
   renderSubs(d.sub_list || []);
 }
@@ -484,8 +531,10 @@ function handleMsg(data) {
 function connect() {
   const url = $('ws-url').value.trim();
   if (!url) return;
+
   addLog('正在连接 ' + url + ' ...', 'ev-warn');
   ws = new WebSocket(url);
+
   ws.onopen = () => {
     $('ws-dot').className = 'dot on';
     $('ws-status').textContent = '已连接';
@@ -493,8 +542,11 @@ function connect() {
     $('btn-disconnect').style.display = '';
     addLog('WebSocket 已连接', 'ev-ok');
   };
+
   ws.onmessage = e => handleMsg(e.data);
+
   ws.onerror = () => addLog('连接错误', 'ev-err');
+
   ws.onclose = e => {
     $('ws-dot').className = 'dot err';
     $('ws-status').textContent = '已断开';
@@ -509,7 +561,7 @@ function disconnect() {
   if (ws) { ws.close(); ws = null; }
 }
 
-$('btn-connect').onclick    = connect;
+$('btn-connect').onclick = connect;
 $('btn-disconnect').onclick = disconnect;
 $('ws-url').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
 

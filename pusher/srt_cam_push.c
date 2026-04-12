@@ -1,3 +1,5 @@
+//pusher/srt_cam_push.c
+
 #include <gst/gst.h>
 #include <glib.h>
 #include <stdio.h>
@@ -11,6 +13,16 @@
 #include <sys/select.h>
 #include <gst/video/video.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+
+#include "telemetry.h"
+
+#define TLMY_MAGIC    0x544C4D59u
+#define TLMY_VERSION  1
+#define TLMY_PORT     19900
+#define TLMY_INTERVAL_MS 500   //  500ms 
 
 typedef struct {
     const gchar *device_path;
@@ -44,7 +56,7 @@ static const AppConfig kAppConfig = {
     .bitrate_kbps = 2000,
     .gop = 50,
     .profile = "baseline",
-    .srt_latency = 120,
+    .srt_latency = 40,
     .audio_enabled = TRUE,
     .audio_device = "plughw:3,0",
     .audio_bitrate_kbps = 128,
@@ -115,6 +127,66 @@ static gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data) {
     return TRUE;
 }
 
+
+static uint64_t push_mono_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+typedef struct {
+    const char *relay_host;
+    int         relay_port;   // TLMY_PORT
+    atomic_bool stop;
+    pthread_t   thread;
+} TelemetrySender;
+
+static void *telemetry_send_thread(void *arg) {
+    TelemetrySender *ts = (TelemetrySender *)arg;
+
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        g_printerr("[TLMY] socket failed\n");
+        return NULL;
+    }
+
+    struct sockaddr_in dst = {0};
+    dst.sin_family = AF_INET;
+    dst.sin_port   = htons((uint16_t)ts->relay_port);
+    inet_pton(AF_INET, ts->relay_host, &dst.sin_addr);
+
+    uint64_t seq = 0;
+    while (!atomic_load(&ts->stop)) {
+        TelemetryPkt pkt;
+        uint64_t now = wall_us();
+        g_print("[TLMY-PUSH] wall_us=%llu\n", (unsigned long long)now);
+        tlmy_encode(&pkt, seq++, now, 0);
+
+        sendto(fd, &pkt, sizeof(pkt), 0,
+               (struct sockaddr*)&dst, sizeof(dst));
+
+        struct timespec sl = {0, TLMY_INTERVAL_MS * 1000000L};
+        nanosleep(&sl, NULL);
+    }
+
+    close(fd);
+    return NULL;
+}
+
+static void start_telemetry_sender(TelemetrySender *ts,
+                                   const char *host, int port) {
+    ts->relay_host = host;
+    ts->relay_port = port;
+    atomic_init(&ts->stop, false);
+    pthread_create(&ts->thread, NULL, telemetry_send_thread, ts);
+    g_print("[TLMY] sender started -> %s:%d\n", host, port);
+}
+
+static void stop_telemetry_sender(TelemetrySender *ts) {
+    atomic_store(&ts->stop, true);
+    pthread_join(ts->thread, NULL);
+}
+
 // -------- Control server: accepts PAUSE/RESUME over TCP --------
 typedef struct {
     GstElement *pipeline;
@@ -174,7 +246,7 @@ static GstPadProbeReturn event_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpoi
         }
     } else if (type == GST_EVENT_CUSTOM_DOWNSTREAM ||
                type == GST_EVENT_CUSTOM_DOWNSTREAM_OOB) {
-                
+
         GstClockTime timestamp = GST_CLOCK_TIME_NONE;
         GstClockTime stream_time = GST_CLOCK_TIME_NONE;
         GstClockTime running_time = GST_CLOCK_TIME_NONE;
@@ -606,11 +678,15 @@ int main(int argc, char *argv[]) {
         g_print("Control server listening on %d (PAUSE/RESUME)\n", cfg->ctrl_port);
     }
 
+    TelemetrySender tlmy_sender = {0};
+    start_telemetry_sender(&tlmy_sender, cfg->host, TLMY_PORT);
+
     g_main_loop_run(loop);
 
     g_print("Shutting down...\n");
     gst_element_set_state(pipeline, GST_STATE_NULL);
     stop_control_server(&ctrl);
+    stop_telemetry_sender(&tlmy_sender);
 
     gst_object_unref(bus);
     gst_object_unref(pipeline);

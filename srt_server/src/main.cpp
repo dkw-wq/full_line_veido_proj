@@ -1,4 +1,4 @@
-// srt_relay_server_ws.cpp
+// srt_server/src/main.cpp
 // Based on the original single-channel relay server, with an embedded lightweight WebSocket server
 // Push JSON monitoring data to all connected WebSocket clients every monitor_interval_ms
 //
@@ -39,6 +39,10 @@
 #include <algorithm>
 #include <functional>
 #include <set>
+#include <unordered_map>
+#include <mutex>
+#include <iomanip>
+#include "telemetry.h" 
 
 // SHA-1 + Base64 for WebSocket handshake (self-contained, no external dependencies)
 #include <cstdint>
@@ -206,7 +210,7 @@ struct Config {
     int subscriber_port               = 9001;
     int ws_port                       = 8765;   // WebSocket 监控端口
     int payload_size                  = 1316;
-    int latency_ms                    = 120;
+    int latency_ms                    = 40;
     int recv_buf_bytes                = 4 * 1024 * 1024;
     int send_buf_bytes                = 4 * 1024 * 1024;
     int subscriber_queue_max_chunks   = 512;
@@ -596,6 +600,201 @@ private:
 };
 
 // ============================================================
+// TelemetryRelay — receive telemetry UDP packets and forward to subscribers
+// ============================================================
+
+class TelemetryRelay {
+public:
+    TelemetryRelay() = default;
+    ~TelemetryRelay() { stop(); }
+
+    // subscriber_ips: 回调，每次转发前调用以获取当前订阅者 IP 列表
+    using IpListFn = std::function<std::vector<std::string>()>;
+
+    bool start(const std::string& bind_ip, int listen_port,
+            int fwd_port, IpListFn ip_fn) {
+        fwd_port_ = fwd_port;
+        ip_fn_    = std::move(ip_fn);
+
+        recv_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (recv_fd_ < 0) {
+            log_line("ERROR", "TLMY recv socket failed");
+            return false;
+        }
+
+        int yes = 1;
+        setsockopt(recv_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port   = htons((uint16_t)listen_port);
+        inet_pton(AF_INET,
+                (bind_ip.empty() || bind_ip == "0.0.0.0") ? "0.0.0.0" : bind_ip.c_str(),
+                &addr.sin_addr);
+
+        if (bind(recv_fd_, (sockaddr*)&addr, sizeof(addr)) < 0) {
+            log_line("ERROR", "TLMY bind :" + std::to_string(listen_port) + " failed");
+            close(recv_fd_);
+            recv_fd_ = -1;
+            return false;
+        }
+
+        send_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (send_fd_ < 0) {
+            log_line("ERROR", "TLMY send socket failed");
+            return false;
+        }
+
+        ack_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (ack_fd_ < 0) {
+            log_line("ERROR", "TLMY ack socket failed");
+            return false;
+        }
+
+        sockaddr_in ack_addr{};
+        ack_addr.sin_family = AF_INET;
+        ack_addr.sin_port   = htons((uint16_t)TLMY_ACK_PORT);
+        inet_pton(AF_INET,
+                (bind_ip.empty() || bind_ip == "0.0.0.0") ? "0.0.0.0" : bind_ip.c_str(),
+                &ack_addr.sin_addr);
+
+        if (bind(ack_fd_, (sockaddr*)&ack_addr, sizeof(ack_addr)) < 0) {
+            log_line("ERROR", "TLMY ACK bind :" + std::to_string(TLMY_ACK_PORT) + " failed");
+            close(ack_fd_);
+            ack_fd_ = -1;
+            return false;
+        }
+
+        running_.store(true);
+        recv_thread_ = std::thread([this]{ recv_loop(); });
+        ack_thread_  = std::thread([this]{ ack_loop(); });
+
+        log_line("INFO", "TelemetryRelay listening :" + std::to_string(listen_port)
+                        + " -> fwd :" + std::to_string(fwd_port_)
+                        + ", ack :" + std::to_string(TLMY_ACK_PORT));
+        return true;
+    }
+
+    void stop() {
+        running_.store(false);
+
+        if (recv_fd_ >= 0) { close(recv_fd_); recv_fd_ = -1; }
+        if (send_fd_ >= 0) { close(send_fd_); send_fd_ = -1; }
+        if (ack_fd_  >= 0) { close(ack_fd_);  ack_fd_  = -1; }
+
+        if (recv_thread_.joinable()) recv_thread_.join();
+        if (ack_thread_.joinable())  ack_thread_.join();
+    }
+
+private:
+    void recv_loop() {
+        while (running_.load()) {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(recv_fd_, &rfds);
+            timeval tv{1, 0};
+            if (select(recv_fd_ + 1, &rfds, nullptr, nullptr, &tv) <= 0) continue;
+
+            TelemetryPkt pkt{};
+            ssize_t n = recv(recv_fd_, &pkt, sizeof(pkt), 0);
+            if (n != sizeof(TelemetryPkt)) continue;
+
+            TelemetryPkt decoded{};
+            if (!tlmy_decode(&pkt, (int)n, &decoded)) continue;
+
+            // 保留现有 push->relay 所需字段
+            decoded.t_relay_in_us = wall_us();
+
+            TelemetryPkt to_send{};
+            tlmy_encode(&to_send, decoded.seq, decoded.t_push_us, decoded.t_relay_in_us);
+
+            auto ips = ip_fn_();
+            if (ips.empty()) continue;
+
+            const uint64_t send_mono = mono_us();
+
+            {
+                std::lock_guard<std::mutex> lk(sent_mu_);
+                sent_mono_us_[decoded.seq] = send_mono;
+
+                // 防止表无限长，只保留最近少量
+                if (sent_mono_us_.size() > 2048) {
+                    auto it = sent_mono_us_.begin();
+                    sent_mono_us_.erase(it);
+                }
+            }
+
+            for (const auto& ip : ips) {
+                sockaddr_in dst{};
+                dst.sin_family = AF_INET;
+                dst.sin_port   = htons((uint16_t)fwd_port_);
+                inet_pton(AF_INET, ip.c_str(), &dst.sin_addr);
+
+                sendto(send_fd_, &to_send, sizeof(to_send), 0,
+                    (sockaddr*)&dst, sizeof(dst));
+            }
+        }
+    }
+
+    void ack_loop() {
+        while (running_.load()) {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(ack_fd_, &rfds);
+            timeval tv{1, 0};
+            if (select(ack_fd_ + 1, &rfds, nullptr, nullptr, &tv) <= 0) continue;
+
+            TelemetryAck raw{}, ack{};
+            sockaddr_in from{};
+            socklen_t from_len = sizeof(from);
+
+            ssize_t n = recvfrom(ack_fd_, &raw, sizeof(raw), 0,
+                                (sockaddr*)&from, &from_len);
+            if (n != sizeof(TelemetryAck)) continue;
+            if (!tlmy_ack_decode(&raw, (int)n, &ack)) continue;
+
+            uint64_t sent_us = 0;
+            {
+                std::lock_guard<std::mutex> lk(sent_mu_);
+                auto it = sent_mono_us_.find(ack.seq);
+                if (it == sent_mono_us_.end()) continue;
+                sent_us = it->second;
+                sent_mono_us_.erase(it);
+            }
+
+            const uint64_t now_us = mono_us();
+            const double rtt_ms = ((double)((int64_t)now_us - (int64_t)sent_us)) / 1000.0;
+            const double one_way_est_ms = rtt_ms / 2.0;
+
+            char ipbuf[INET_ADDRSTRLEN] = {0};
+            inet_ntop(AF_INET, &from.sin_addr, ipbuf, sizeof(ipbuf));
+
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(3)
+                << "[LAT-ACK] seq=" << ack.seq
+                << " peer=" << ipbuf
+                << " relay<->play_rtt=" << rtt_ms << "ms"
+                << " relay->play_est=" << one_way_est_ms << "ms";
+            log_line("INFO", oss.str());
+        }
+    }
+
+    int recv_fd_ = -1;
+    int send_fd_ = -1;
+    int ack_fd_  = -1;
+
+    int fwd_port_ = TLMY_FWD_PORT;
+    IpListFn ip_fn_;
+
+    std::atomic<bool> running_{false};
+    std::thread recv_thread_;
+    std::thread ack_thread_;
+
+    std::mutex sent_mu_;
+    std::unordered_map<uint64_t, uint64_t> sent_mono_us_; // seq -> 转发时刻 mono_us
+};
+
+// ============================================================
 // RelayServer —  monitor_loop  ws_.broadcast()
 // ============================================================
 
@@ -623,6 +822,24 @@ public:
         t_sub_acc_ = std::thread([this]{ accept_subscriber_loop(); });
         t_monitor_ = std::thread([this]{ monitor_loop(); });
 
+        
+        tlmy_relay_.start(cfg_.bind_ip, TLMY_PORT, TLMY_FWD_PORT, [this]() {
+
+            std::vector<std::string> ips;
+            std::lock_guard<std::mutex> lk(sub_mu_);
+            for (auto& [id, sess] : subscribers_) {
+                if (!sess->running()) continue;
+                std::string peer = sess->peer(); // "1.2.3.4:5678"
+                auto colon = peer.rfind(':');
+                if (colon != std::string::npos)
+                    ips.push_back(peer.substr(0, colon));
+            }
+            
+            std::sort(ips.begin(), ips.end());
+            ips.erase(std::unique(ips.begin(), ips.end()), ips.end());
+            return ips;
+        });
+
         log_line("INFO", "relay started  pub=" + std::to_string(cfg_.publisher_port) +
                  "  sub=" + std::to_string(cfg_.subscriber_port) +
                  "  ws=" + std::to_string(cfg_.ws_port));
@@ -630,6 +847,8 @@ public:
     }
 
     void stop() {
+        tlmy_relay_.stop();
+
         bool exp = true;
         if (!stopped_.compare_exchange_strong(exp, false)) return;
         g_running.store(false);
@@ -646,6 +865,8 @@ public:
     }
 
 private:
+    TelemetryRelay tlmy_relay_;
+
     SRTSOCKET create_listener(int port, bool for_pub) {
         SRTSOCKET s = srt_socket(AF_INET, SOCK_DGRAM, 0);
         if (s == SRT_INVALID_SOCK) return SRT_INVALID_SOCK;
@@ -931,7 +1152,7 @@ Config parse_args(int argc, char** argv) {
                 "  --sub-port    9001\n"
                 "  --ws-port     8765   WebSocket 监控端口 (0=禁用)\n"
                 "  --bind        0.0.0.0\n"
-                "  --latency-ms  120\n"
+                "  --latency-ms  40\n"
                 "  --monitor-ms  2000\n"
                 "  --max-subs    256\n"
                 "  --pub-idle-ms 15000\n"
