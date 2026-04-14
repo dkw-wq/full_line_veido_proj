@@ -301,16 +301,16 @@
 
 <div class="grid-4" style="margin-bottom:16px">
   <div class="metric-card">
-    <div class="label">Telemetry RTT</div>
-    <div class="value" id="m-trtt">—<span class="unit">ms</span></div>
+    <div class="label">Push→Relay</div>
+    <div class="value" id="m-p2r">—<span class="unit">ms</span></div>
   </div>
   <div class="metric-card">
-    <div class="label">单向估计</div>
-    <div class="value" id="m-toneway">—<span class="unit">ms</span></div>
+    <div class="label">Relay→ACK</div>
+    <div class="value" id="m-r2a">—<span class="unit">ms</span></div>
   </div>
   <div class="metric-card">
-    <div class="label">显示延迟(预留)</div>
-    <div class="value" id="m-present">—<span class="unit">ms</span></div>
+    <div class="label">Push→ACK</div>
+    <div class="value" id="m-p2a">—<span class="unit">ms</span></div>
   </div>
   <div class="metric-card">
     <div class="label">ACK 新鲜度</div>
@@ -459,9 +459,9 @@ function renderSubs(list) {
     + '<th>地址</th>'
     + '<th>已发送</th>'
     + '<th>SRT Latency</th>'
-    + '<th>ACK RTT</th>'
-    + '<th>单向估计</th>'
-    + '<th>显示延迟(预留)</th>'
+    + '<th>Push→Relay</th>'
+    + '<th>Relay→ACK</th>'
+    + '<th>Push→ACK</th>'
     + '<th>队列深度</th>'
     + '<th>ACK 新鲜度</th>'
     + '<th>空闲</th>'
@@ -479,9 +479,9 @@ function renderSubs(list) {
       <td class="mono">${s.peer}</td>
       <td>${fmt(s.sent_mb, 1)} MB</td>
       <td><span class="badge badge-blue">${s.latency_ms < 0 ? '?' : s.latency_ms} ms</span></td>
-      <td><span class="badge badge-green">${(s.telemetry_rtt_ms != null && s.telemetry_rtt_ms >= 0) ? fmt(s.telemetry_rtt_ms, 2) + ' ms' : '—'}</span></td>
-      <td><span class="badge badge-amber">${(s.telemetry_oneway_ms != null && s.telemetry_oneway_ms >= 0) ? fmt(s.telemetry_oneway_ms, 2) + ' ms' : '—'}</span></td>
-      <td><span class="badge badge-gray">—</span></td>
+      <td><span class="badge badge-blue">${(s.telemetry_push_to_relay_ms != null && s.telemetry_push_to_relay_ms >= 0) ? fmt(s.telemetry_push_to_relay_ms, 2) + ' ms' : '—'}</span></td>
+      <td><span class="badge badge-amber">${(s.telemetry_relay_to_ack_ms != null && s.telemetry_relay_to_ack_ms >= 0) ? fmt(s.telemetry_relay_to_ack_ms, 2) + ' ms' : '—'}</span></td>
+      <td><span class="badge badge-green">${(s.telemetry_push_to_ack_ms != null && s.telemetry_push_to_ack_ms >= 0) ? fmt(s.telemetry_push_to_ack_ms, 2) + ' ms' : '—'}</span></td>
       <td>${s.q}</td>
       <td><span class="${ackFreshCls}">${fmtMs(s.telemetry_last_ack_ms)}</span></td>
       <td><span class="${idleCls}">${fmtMs(idle)}</span></td>
@@ -519,10 +519,20 @@ function handleMsg(data) {
   dropEl.textContent = d.queue_drops ?? '—';
   dropEl.style.color = (d.queue_drops > 0) ? 'var(--red)' : 'var(--green)';
 
-  $('m-trtt').innerHTML    = fmt(d.dash_rtt_ms, 2) + '<span class="unit">ms</span>';
-  $('m-toneway').innerHTML = fmt(d.dash_oneway_ms, 2) + '<span class="unit">ms</span>';
-  $('m-present').innerHTML = '—<span class="unit">ms</span>';
-  $('m-ackfresh').textContent = fmtMs(d.dash_ack_fresh_ms);
+  $('m-p2r').innerHTML = fmt(d.dash_push_to_relay_ms, 2) + '<span class="unit">ms</span>';
+  $('m-r2a').innerHTML = fmt(d.dash_relay_to_ack_ms, 2) + '<span class="unit">ms</span>';
+  $('m-p2a').innerHTML = fmt(d.dash_push_to_ack_ms, 2) + '<span class="unit">ms</span>';
+
+  let dashAckFresh = -1;
+  if (d.sub_list && d.sub_list.length > 0) {
+    for (const s of d.sub_list) {
+      if (s.telemetry_last_ack_ms != null && s.telemetry_last_ack_ms >= 0) {
+        dashAckFresh = s.telemetry_last_ack_ms;
+        break;
+      }
+    }
+  }
+  $('m-ackfresh').textContent = fmtMs(dashAckFresh);
 
   updateChart(d.ingress_hist || [], d.egress_hist || []);
   renderSubs(d.sub_list || []);

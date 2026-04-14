@@ -19,10 +19,8 @@
 
 #include "telemetry.h"
 
-#define TLMY_MAGIC    0x544C4D59u
-#define TLMY_VERSION  1
-#define TLMY_PORT     19900
-#define TLMY_INTERVAL_MS 500   //  500ms 
+
+
 
 typedef struct {
     const gchar *device_path;
@@ -41,6 +39,99 @@ typedef struct {
     const gchar *audio_codec; // aac | opus
     gint ctrl_port;           // TCP control port for pause/resume
 } AppConfig;
+
+
+typedef struct {
+    guint64 media_ts_packets;
+    guint64 next_inject_at;
+    guint64 seq;
+    guint8  cc;
+} TelemetryInjectCtx;
+
+static GstBuffer *append_tlmy_ts_packet(GstBuffer *buf, TelemetryInjectCtx *ctx) {
+    guint8 pkt[188];
+    tlmy_ts_build(pkt, wall_us(), ctx->seq++, ctx->cc);
+    ctx->cc = (guint8)((ctx->cc + 1) & 0x0F);
+
+    GstBuffer *tail = gst_buffer_new_allocate(NULL, 188, NULL);
+    if (!tail) return buf;
+
+    GstMapInfo map;
+    if (!gst_buffer_map(tail, &map, GST_MAP_WRITE)) {
+        gst_buffer_unref(tail);
+        return buf;
+    }
+
+    memcpy(map.data, pkt, 188);
+    gst_buffer_unmap(tail, &map);
+
+    return gst_buffer_append(buf, tail);
+}
+
+static GstPadProbeReturn tlmy_inject_probe_cb(GstPad *pad,
+                                              GstPadProbeInfo *info,
+                                              gpointer user_data) {
+    (void)pad;
+
+    if (!(GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER)) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (!buf) return GST_PAD_PROBE_OK;
+
+    TelemetryInjectCtx *ctx = (TelemetryInjectCtx *)user_data;
+    gsize sz = gst_buffer_get_size(buf);
+    if (sz < 188 || (sz % 188) != 0) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    guint64 start_pkt = ctx->media_ts_packets + 1;
+    guint64 end_pkt   = ctx->media_ts_packets + (guint64)(sz / 188);
+    ctx->media_ts_packets = end_pkt;
+
+    guint inject_count = 0;
+    while (ctx->next_inject_at != 0 && ctx->next_inject_at >= start_pkt && ctx->next_inject_at <= end_pkt) {
+        ++inject_count;
+        ctx->next_inject_at += TLMY_TS_INTERVAL;
+    }
+
+    if (inject_count == 0) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    GstBuffer *out = gst_buffer_make_writable(buf);
+    for (guint i = 0; i < inject_count; ++i) {
+        out = append_tlmy_ts_packet(out, ctx);
+    }
+
+    GST_PAD_PROBE_INFO_DATA(info) = out;
+    return GST_PAD_PROBE_OK;
+}
+
+static gboolean install_tlmy_injector(GstElement *pipeline, TelemetryInjectCtx *ctx) {
+    GstElement *ident = gst_bin_get_by_name(GST_BIN(pipeline), "tlmyinject");
+    if (!ident) {
+        g_printerr("[TLMY] identity element 'tlmyinject' not found\n");
+        return FALSE;
+    }
+
+    GstPad *src = gst_element_get_static_pad(ident, "src");
+    gst_object_unref(ident);
+    if (!src) {
+        g_printerr("[TLMY] failed to get tlmyinject:src\n");
+        return FALSE;
+    }
+
+    gst_pad_add_probe(src,
+                      GST_PAD_PROBE_TYPE_BUFFER,
+                      tlmy_inject_probe_cb,
+                      ctx,
+                      NULL);
+    gst_object_unref(src);
+    g_print("[TLMY] TS injector installed on tlmyinject:src\n");
+    return TRUE;
+}
 
 /*
  * 唯一配置变量
@@ -134,58 +225,7 @@ static uint64_t push_mono_us(void) {
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
-typedef struct {
-    const char *relay_host;
-    int         relay_port;   // TLMY_PORT
-    atomic_bool stop;
-    pthread_t   thread;
-} TelemetrySender;
 
-static void *telemetry_send_thread(void *arg) {
-    TelemetrySender *ts = (TelemetrySender *)arg;
-
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        g_printerr("[TLMY] socket failed\n");
-        return NULL;
-    }
-
-    struct sockaddr_in dst = {0};
-    dst.sin_family = AF_INET;
-    dst.sin_port   = htons((uint16_t)ts->relay_port);
-    inet_pton(AF_INET, ts->relay_host, &dst.sin_addr);
-
-    uint64_t seq = 0;
-    while (!atomic_load(&ts->stop)) {
-        TelemetryPkt pkt;
-        uint64_t now = wall_us();
-        g_print("[TLMY-PUSH] wall_us=%llu\n", (unsigned long long)now);
-        tlmy_encode(&pkt, seq++, now, 0);
-
-        sendto(fd, &pkt, sizeof(pkt), 0,
-               (struct sockaddr*)&dst, sizeof(dst));
-
-        struct timespec sl = {0, TLMY_INTERVAL_MS * 1000000L};
-        nanosleep(&sl, NULL);
-    }
-
-    close(fd);
-    return NULL;
-}
-
-static void start_telemetry_sender(TelemetrySender *ts,
-                                   const char *host, int port) {
-    ts->relay_host = host;
-    ts->relay_port = port;
-    atomic_init(&ts->stop, false);
-    pthread_create(&ts->thread, NULL, telemetry_send_thread, ts);
-    g_print("[TLMY] sender started -> %s:%d\n", host, port);
-}
-
-static void stop_telemetry_sender(TelemetrySender *ts) {
-    atomic_store(&ts->stop, true);
-    pthread_join(ts->thread, NULL);
-}
 
 // -------- Control server: accepts PAUSE/RESUME over TCP --------
 typedef struct {
@@ -560,7 +600,7 @@ int main(int argc, char *argv[]) {
 
     g_string_append_printf(
         pipeline_desc,
-        "mpegtsmux name=mux alignment=7 ! queue ! "
+        "mpegtsmux name=mux alignment=7 ! queue ! identity name=tlmyinject silent=true ! "
         "srtclientsink uri=\"srt://%s:%d?mode=caller&latency=%d\" ",
         cfg->host,
         cfg->port,
@@ -659,6 +699,13 @@ int main(int argc, char *argv[]) {
     loop = g_main_loop_new(NULL, FALSE);
     bus = gst_element_get_bus(pipeline);
     gst_bus_add_watch(bus, bus_call, loop);
+   
+    TelemetryInjectCtx tlmy_inject = {0};
+    tlmy_inject.next_inject_at = TLMY_TS_INTERVAL;
+
+    if (!install_tlmy_injector(pipeline, &tlmy_inject)) {
+        g_printerr("[TLMY] injector install failed\n");
+    }
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
@@ -678,15 +725,11 @@ int main(int argc, char *argv[]) {
         g_print("Control server listening on %d (PAUSE/RESUME)\n", cfg->ctrl_port);
     }
 
-    TelemetrySender tlmy_sender = {0};
-    start_telemetry_sender(&tlmy_sender, cfg->host, TLMY_PORT);
-
     g_main_loop_run(loop);
 
     g_print("Shutting down...\n");
     gst_element_set_state(pipeline, GST_STATE_NULL);
     stop_control_server(&ctrl);
-    stop_telemetry_sender(&tlmy_sender);
 
     gst_object_unref(bus);
     gst_object_unref(pipeline);

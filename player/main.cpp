@@ -193,132 +193,6 @@ static int interrupt_cb(void* opaque) {
 }
 
 // ============================================================
-// TelemetryReceiver
-// ============================================================
-
-class TelemetryReceiver {
-public:
-    TelemetryReceiver() = default;
-    ~TelemetryReceiver() { stop(); }
-
-    // print_interval_ms: 限制打印频率，避免刷屏（0 = 每包都打）
-    void start(const std::string& relay_host,
-            int listen_port = TLMY_FWD_PORT,
-            int ack_port = TLMY_ACK_PORT,
-            int print_interval_ms = 500) {
-        print_interval_ms_ = print_interval_ms;
-
-        WSADATA wsa{};
-        WSAStartup(MAKEWORD(2, 2), &wsa);
-
-        sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock_ == INVALID_SOCKET) {
-            std::cerr << "[TLMY] recv socket failed\n";
-            return;
-        }
-
-        sockaddr_in addr{};
-        addr.sin_family      = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port        = htons((uint16_t)listen_port);
-
-        if (bind(sock_, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-            std::cerr << "[TLMY] bind :" << listen_port << " failed\n";
-            closesocket(sock_);
-            sock_ = INVALID_SOCKET;
-            return;
-        }
-
-        DWORD timeout_ms = 1000;
-        setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO,
-                (const char*)&timeout_ms, sizeof(timeout_ms));
-
-        ack_sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (ack_sock_ == INVALID_SOCKET) {
-            std::cerr << "[TLMY] ack socket failed\n";
-            closesocket(sock_);
-            sock_ = INVALID_SOCKET;
-            return;
-        }
-
-        memset(&ack_dst_, 0, sizeof(ack_dst_));
-        ack_dst_.sin_family = AF_INET;
-        ack_dst_.sin_port   = htons((uint16_t)ack_port);
-        inet_pton(AF_INET, relay_host.c_str(), &ack_dst_.sin_addr);
-
-        running_.store(true);
-        thread_ = std::thread([this]{ recv_loop(); });
-
-        std::cout << "[TLMY] receiver started on :" << listen_port
-                << ", ack -> " << relay_host << ":" << ack_port << "\n";
-    }
-
-    void stop() {
-        running_.store(false);
-
-        if (sock_ != INVALID_SOCKET) {
-            closesocket(sock_);
-            sock_ = INVALID_SOCKET;
-        }
-        if (ack_sock_ != INVALID_SOCKET) {
-            closesocket(ack_sock_);
-            ack_sock_ = INVALID_SOCKET;
-        }
-
-        if (thread_.joinable()) thread_.join();
-        WSACleanup();
-    }
-
-private:
-
-
-    void recv_loop() {
-        while (running_.load()) {
-            TelemetryPkt raw{}, pkt{};
-            int n = recv(sock_, (char*)&raw, sizeof(raw), 0);
-
-            if (n == SOCKET_ERROR) {
-                if (WSAGetLastError() == WSAETIMEDOUT) continue;
-                break;
-            }
-
-            if (!tlmy_decode(&raw, n, &pkt)) continue;
-
-            // 1) 只保留可信的 push->relay
-            const double push_to_relay_ms =
-                ((double)((int64_t)pkt.t_relay_in_us - (int64_t)pkt.t_push_us)) / 1000.0;
-
-            // 2) 立刻发送 ACK 给中继
-            TelemetryAck ack{};
-            tlmy_ack_encode(&ack, pkt.seq);
-            sendto(ack_sock_, (const char*)&ack, sizeof(ack), 0,
-                (sockaddr*)&ack_dst_, sizeof(ack_dst_));
-
-            // 3) 限频打印
-            const uint64_t now = mono_us();
-            if (print_interval_ms_ == 0 ||
-                now - last_print_us_ >= (uint64_t)print_interval_ms_ * 1000ULL) {
-                last_print_us_ = now;
-                std::cout << std::fixed << std::setprecision(3)
-                        << "[LAT] seq=" << pkt.seq
-                        << "  push->relay=" << push_to_relay_ms << "ms"
-                        << "  ack=sent"
-                        << "\n";
-            }
-        }
-    }
-
-
-    SOCKET sock_ = INVALID_SOCKET;       // 接收 telemetry
-    SOCKET ack_sock_ = INVALID_SOCKET;   // 发送 ACK
-    sockaddr_in ack_dst_{};
-    std::atomic<bool> running_{false};
-    std::thread thread_;
-    int print_interval_ms_ = 500;
-    uint64_t last_print_us_ = 0;
-};
-
-// ============================================================
 // AudioPipeline
 // ============================================================
 
@@ -652,7 +526,9 @@ public:
     };
 
 public:
-    explicit FFmpegD3D11Player(HWND hwnd, std::string url, QObject* parent = nullptr)
+    explicit FFmpegD3D11Player(HWND hwnd,
+                            std::string url,
+                            QObject* parent = nullptr)
         : QObject(parent), hwnd_(hwnd), url_(std::move(url)) {
         status_.url = QString::fromStdString(url_);
     }
@@ -844,6 +720,7 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 continue;
             }
+
 
             setPlaybackStatus(PlayerState::ProbingStreams, PlayerErrorCode::None, "探测流信息...");
             if (int r = avformat_find_stream_info(fmt_ctx, nullptr); r < 0) {
@@ -1067,7 +944,6 @@ int main(int argc, char* argv[]) {
 
     const std::string url            = argv[1];
     const std::string push_ctrl_host = extract_host_from_srt_url(url);
-    ControlClient ctrl(push_ctrl_host, 10090);
 
     QWidget surface;
     surface.setAttribute(Qt::WA_NativeWindow);
@@ -1163,7 +1039,9 @@ int main(int argc, char* argv[]) {
     mainLayout->addWidget(ctrlBar, 0);
 
     HWND hwnd = reinterpret_cast<HWND>(surface.winId());
+    ControlClient ctrl(push_ctrl_host, 10090);
     FFmpegD3D11Player player(hwnd, url);
+    
 
     QObject::connect(&player, &FFmpegD3D11Player::statusChanged,
                      [&](const PlayerStatus& s) {
@@ -1266,12 +1144,8 @@ int main(int argc, char* argv[]) {
     container.resize(1280, 800);
     container.show();
 
-    TelemetryReceiver tlmy;
-    tlmy.start(push_ctrl_host, TLMY_FWD_PORT, TLMY_ACK_PORT, 500);  // 每 500ms 最多打一行
-
     if (!player.start()) {
-        std::cerr << "Player start failed\n";
-        return -1;
+        std::cerr << "player.start() failed\n";
     }
 
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
@@ -1279,7 +1153,6 @@ int main(int argc, char* argv[]) {
 
     int code = app.exec();
     player.stop();
-    tlmy.stop();
     
     return code;
 }
