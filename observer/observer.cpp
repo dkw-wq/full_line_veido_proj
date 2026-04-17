@@ -54,7 +54,7 @@ struct Config {
     std::string url;
     std::string ack_host;
     int ack_port = TLMY_ACK_PORT;
-    int latency_ms = 40;
+    int latency_ms = 20;
     int recv_timeout_ms = 2000;
     int reconnect_ms = 500;
     std::string streamid;
@@ -65,7 +65,7 @@ struct Config {
 struct ParsedUrl {
     std::string host;
     int port = 0;
-    int latency_ms = 40;
+    int latency_ms = 20;
     std::string streamid;
     std::optional<std::string> passphrase;
     int pbkeylen = 16;

@@ -1,14 +1,14 @@
 // srt_relay_server_observer_ready.cpp
-// 旁路 observer 方案适配版：
-// 1) 推流端仍然把 telemetry private TS section 随流发送
-// 2) 中继端在 publisher_read_loop() 中直接观察原始 TS chunk，记录 seq -> t_push_us
-// 3) 独立 observer 作为额外订阅者收同一条 SRT 流，解析 telemetry 包后通过 UDP ACK 回中继
-// 4) 中继端收到 ACK 后计算 push->relay / relay->ack / push->ack，并在 monitor_loop() 展示
+// Adapted version for the sidecar observer approach:
+// 1) The publisher still sends telemetry private TS sections within the stream
+// 2) The relay directly observes the original TS chunks in publisher_read_loop() and records seq -> t_push_us
+// 3) An independent observer acts as an additional subscriber, receives the same SRT stream, parses telemetry packets, and sends UDP ACKs back to the relay
+// 4) After receiving an ACK, the relay calculates push->relay / relay->ack / push->ack, and displays them in monitor_loop()
 //
-// 说明：
-// - 主播放器进程不需要改，继续保持原有不卡的版本。
-// - observer 会作为一个额外 subscriber 连接到 relay，dashboard 里会多出一个订阅者条目。
-// - 全局 dashboard 指标使用最近一次 ACK 结果，不依赖 subscriber 匹配一定成功。
+// Notes:
+// - The main player process does not need to be modified and can keep the original smooth-running version.
+// - The observer will connect to the relay as an additional subscriber, so one more subscriber entry will appear on the dashboard.
+// - The global dashboard metrics use the most recent ACK result and do not depend on subscriber matching always succeeding.
 
 #include <srt/srt.h>
 
@@ -41,7 +41,14 @@
 
 #include "telemetry.h"
 
+namespace {
+
+static void dump_srt_latency(const char* tag, SRTSOCKET s);
+
+}
+
 namespace ws_util {
+
 
 static uint32_t rotl32(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
 
@@ -195,7 +202,7 @@ struct Config {
     int subscriber_port               = 9001;
     int ws_port                       = 8765;
     int payload_size                  = 4096;
-    int latency_ms                    = 40;
+    int latency_ms                    = 20;
     int recv_buf_bytes                = 4 * 1024 * 1024;
     int send_buf_bytes                = 4 * 1024 * 1024;
     int subscriber_queue_max_chunks   = 512;
@@ -524,6 +531,9 @@ private:
         status_.subscriber_count.fetch_add(1);
         last_active_ms_.store(steady_ms());
         latency_ms_.store(read_latency(sock_));
+        
+        log_line("INFO", "subscriber connected: " + sockaddr_to_string(peer_));
+        dump_srt_latency("[SUB]", sock_);
         log_line("INFO", "sub#" + std::to_string(id_) + " started: " + peer());
 
         while (running_.load() && g_running.load()) {
@@ -725,6 +735,7 @@ private:
             inet_ntop(AF_INET, &from.sin_addr, ipbuf, sizeof(ipbuf));
 
             std::ostringstream oss;
+            /*
             oss << std::fixed << std::setprecision(3)
                 << "[LAT-ACK] seq=" << ack.seq
                 << " peer=" << ipbuf
@@ -732,7 +743,7 @@ private:
                 << " relay->ack=" << relay_to_ack_ms << "ms"
                 << " push->ack=" << push_to_ack_ms << "ms";
             log_line("INFO", oss.str());
-
+            */
             if (ack_update_fn_) {
                 ack_update_fn_(std::string(ipbuf), push_to_relay_ms, relay_to_ack_ms, push_to_ack_ms);
             }
@@ -830,15 +841,18 @@ private:
         };
         int yes=1, lat=cfg_.latency_ms, rb=cfg_.recv_buf_bytes, sb=cfg_.send_buf_bytes;
         int tt=SRTT_LIVE, rto=for_pub?cfg_.publisher_idle_timeout_ms:5000;
-        sf(SRTO_REUSEADDR,&yes,sizeof(yes),"REUSEADDR");
-        sf(SRTO_RCVSYN,&yes,sizeof(yes),"RCVSYN");
-        sf(SRTO_SNDSYN,&yes,sizeof(yes),"SNDSYN");
-        sf(SRTO_TSBPDMODE,&yes,sizeof(yes),"TSBPDMODE");
-        sf(SRTO_LATENCY,&lat,sizeof(lat),"LATENCY");
-        sf(SRTO_RCVBUF,&rb,sizeof(rb),"RCVBUF");
-        sf(SRTO_SNDBUF,&sb,sizeof(sb),"SNDBUF");
-        sf(SRTO_TRANSTYPE,&tt,sizeof(tt),"TRANSTYPE");
-        sf(SRTO_RCVTIMEO,&rto,sizeof(rto),"RCVTIMEO");
+
+        sf(SRTO_TSBPDMODE, &yes, sizeof(yes), "TSBPDMODE");
+        sf(SRTO_TRANSTYPE, &tt, sizeof(tt), "TRANSTYPE");
+
+        sf(SRTO_RCVLATENCY, &lat, sizeof(lat), "RCVLATENCY");
+        sf(SRTO_PEERLATENCY, &lat, sizeof(lat), "PEERLATENCY");
+        sf(SRTO_LATENCY, &lat, sizeof(lat), "LATENCY");
+
+        sf(SRTO_RCVBUF, &rb, sizeof(rb), "RCVBUF");
+        sf(SRTO_SNDBUF, &sb, sizeof(sb), "SNDBUF");
+        sf(SRTO_RCVTIMEO, &rto, sizeof(rto), "RCVTIMEO");
+
         if (cfg_.passphrase && !cfg_.passphrase->empty()) {
             int pk = cfg_.pbkeylen;
             sf(SRTO_PASSPHRASE,cfg_.passphrase->c_str(),(int)cfg_.passphrase->size(),"PASSPHRASE");
@@ -874,7 +888,10 @@ private:
                 status_.publisher_connected_at_ms.store(steady_ms());
                 status_.publisher_last_active_at_ms.store(steady_ms());
             }
-            log_line("INFO","publisher connected: "+sockaddr_to_string(peer));
+
+            log_line("INFO", "publisher connected: " + sockaddr_to_string(pub_peer_));
+            dump_srt_latency("[PUB]", pub_sock_);
+
             t_pub_read_ = std::thread([this]{ publisher_read_loop(); });
             if (t_pub_read_.joinable()) t_pub_read_.join();
             close_publisher();
@@ -996,7 +1013,7 @@ private:
                     << " subs=" << status_.subscriber_count.load()
                     << " disc=" << status_.ts_discontinuities.load()
                     << " drops=" << status_.subscriber_queue_drops.load();
-            log_line("STAT", log_oss.str());
+            //log_line("STAT", log_oss.str());
 
             if (cfg_.ws_port > 0 && ws_.client_count() > 0) {
                 std::ostringstream j;
@@ -1140,6 +1157,26 @@ Config parse_args(int argc, char** argv) {
 void sig_handler(int) { g_running.store(false); }
 
 } // namespace
+
+namespace {
+
+static void dump_srt_latency(const char* tag, SRTSOCKET s) {
+    int v = 0;
+    int l = sizeof(v);
+
+    if (srt_getsockflag(s, SRTO_RCVLATENCY, &v, &l) == 0)
+        log_line("INFO", std::string(tag) + " RCVLATENCY=" + std::to_string(v));
+
+    l = sizeof(v);
+    if (srt_getsockflag(s, SRTO_PEERLATENCY, &v, &l) == 0)
+        log_line("INFO", std::string(tag) + " PEERLATENCY=" + std::to_string(v));
+
+    l = sizeof(v);
+    if (srt_getsockflag(s, SRTO_LATENCY, &v, &l) == 0)
+        log_line("INFO", std::string(tag) + " LATENCY=" + std::to_string(v));
+}
+
+}
 
 int main(int argc, char** argv) {
     std::signal(SIGINT,  sig_handler);
