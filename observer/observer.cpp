@@ -25,9 +25,8 @@
 #include <unistd.h>
 #endif
 
-extern "C" {
 #include "telemetry.h"
-}
+
 
 namespace {
 
@@ -316,7 +315,7 @@ private:
             order_.pop_front();
         }
         sender_.send_ack(seq);
-        std::cout << "[OBS] ack seq=" << seq << "\n";
+        //std::cout << "[OBS] ack seq=" << seq << "\n";
     }
 
 private:
@@ -390,6 +389,7 @@ public:
 
 private:
     SRTSOCKET connect_once(const ParsedUrl& pu) {
+        sockaddr_in addr{};
         SRTSOCKET s = srt_socket(AF_INET, SOCK_DGRAM, 0);
         if (s == SRT_INVALID_SOCK) {
             std::cerr << "[OBS] srt_socket failed\n";
@@ -423,7 +423,7 @@ private:
             if (!sf(SRTO_PBKEYLEN, &pk, sizeof(pk), "PBKEYLEN")) goto fail;
         }
 
-        sockaddr_in addr{};
+
         addr.sin_family = AF_INET;
         addr.sin_port = htons((uint16_t)pu.port);
         if (inet_pton(AF_INET, pu.host.c_str(), &addr.sin_addr) != 1) {

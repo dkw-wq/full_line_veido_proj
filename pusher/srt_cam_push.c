@@ -16,11 +16,9 @@
 #include <time.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <alsa/asoundlib.h>
 
 #include "telemetry.h"
-
-
-
 
 typedef struct {
     const gchar *device_path;
@@ -34,12 +32,11 @@ typedef struct {
     const gchar *profile;   // baseline / main
     gint srt_latency;       // ms
     gboolean audio_enabled;
-    const gchar *audio_device;
+    const gchar *audio_device;   // preferred capture keyword; NULL means no preference
     gint audio_bitrate_kbps;
     const gchar *audio_codec; // aac | opus
     gint ctrl_port;           // TCP control port for pause/resume
 } AppConfig;
-
 
 typedef struct {
     guint64 media_ts_packets;
@@ -133,10 +130,6 @@ static gboolean install_tlmy_injector(GstElement *pipeline, TelemetryInjectCtx *
     return TRUE;
 }
 
-/*
- * 唯一配置变量
- * 这里直接绑定这只罗技摄像头的稳定 by-id 路径，不再依赖 /dev/videoN
- */
 static const AppConfig kAppConfig = {
     .device_path = "/dev/v4l/by-id/usb-046d_0825_1ED9E9C0-video-index0",
     .host = "10.160.196.17",
@@ -149,11 +142,156 @@ static const AppConfig kAppConfig = {
     .profile = "baseline",
     .srt_latency = 40,
     .audio_enabled = TRUE,
-    .audio_device = "plughw:3,0",
+    .audio_device = NULL,
     .audio_bitrate_kbps = 128,
     .audio_codec = "aac",
     .ctrl_port = 10090
 };
+
+
+typedef struct {
+    gchar *device;
+    gchar *card_id;
+    gchar *card_name;
+    gchar *pcm_name;
+    gint card_index;
+    gint device_index;
+} AudioInputCandidate;
+
+static void audio_input_candidate_free(AudioInputCandidate *dev) {
+    if (!dev) return;
+    g_free(dev->device);
+    g_free(dev->card_id);
+    g_free(dev->card_name);
+    g_free(dev->pcm_name);
+    g_free(dev);
+}
+
+static gboolean ascii_contains_ci(const gchar *haystack, const gchar *needle) {
+    if (!haystack || !needle || !*needle) {
+        return FALSE;
+    }
+
+    gchar *haystack_lower = g_ascii_strdown(haystack, -1);
+    gchar *needle_lower = g_ascii_strdown(needle, -1);
+    gboolean matched = (strstr(haystack_lower, needle_lower) != NULL);
+
+    g_free(haystack_lower);
+    g_free(needle_lower);
+    return matched;
+}
+
+static GPtrArray *enumerate_alsa_capture_devices(void) {
+    GPtrArray *devices = g_ptr_array_new_with_free_func((GDestroyNotify)audio_input_candidate_free);
+    int card = -1;
+
+    if (snd_card_next(&card) < 0) {
+        g_printerr("[AUDIO] snd_card_next failed while enumerating capture devices\n");
+        return devices;
+    }
+
+    while (card >= 0) {
+        char ctl_name[32];
+        snprintf(ctl_name, sizeof(ctl_name), "hw:%d", card);
+
+        snd_ctl_t *ctl = NULL;
+        if (snd_ctl_open(&ctl, ctl_name, 0) >= 0) {
+            snd_ctl_card_info_t *card_info = NULL;
+            snd_ctl_card_info_alloca(&card_info);
+
+            if (snd_ctl_card_info(ctl, card_info) >= 0) {
+                const char *card_id = snd_ctl_card_info_get_id(card_info);
+                const char *card_name = snd_ctl_card_info_get_name(card_info);
+
+                int dev = -1;
+                while (snd_ctl_pcm_next_device(ctl, &dev) >= 0 && dev >= 0) {
+                    snd_pcm_info_t *pcm_info = NULL;
+                    snd_pcm_info_alloca(&pcm_info);
+                    snd_pcm_info_set_device(pcm_info, (unsigned int)dev);
+                    snd_pcm_info_set_subdevice(pcm_info, 0);
+                    snd_pcm_info_set_stream(pcm_info, SND_PCM_STREAM_CAPTURE);
+
+                    if (snd_ctl_pcm_info(ctl, pcm_info) >= 0) {
+                        AudioInputCandidate *candidate = g_new0(AudioInputCandidate, 1);
+                        if (!candidate) {
+                            continue;
+                        }
+
+                        candidate->card_index = card;
+                        candidate->device_index = dev;
+                        candidate->card_id = g_strdup(card_id ? card_id : "");
+                        candidate->card_name = g_strdup(card_name ? card_name : "");
+                        candidate->pcm_name = g_strdup(snd_pcm_info_get_name(pcm_info));
+
+                        if (card_id && *card_id) {
+                            candidate->device = g_strdup_printf("plughw:CARD=%s,DEV=%d", card_id, dev);
+                        } else {
+                            candidate->device = g_strdup_printf("plughw:%d,%d", card, dev);
+                        }
+
+                        g_ptr_array_add(devices, candidate);
+                    }
+                }
+            }
+
+            snd_ctl_close(ctl);
+        }
+
+        if (snd_card_next(&card) < 0) {
+            break;
+        }
+    }
+
+    return devices;
+}
+
+static gchar *resolve_audio_device(const gchar *preferred_keyword) {
+    GPtrArray *devices = enumerate_alsa_capture_devices();
+    gchar *selected = NULL;
+    const gchar *reason = NULL;
+
+    g_print("[AUDIO] preferred keyword: %s\n",
+            (preferred_keyword && *preferred_keyword) ? preferred_keyword : "(none)");
+
+    for (guint i = 0; i < devices->len; ++i) {
+        AudioInputCandidate *dev = g_ptr_array_index(devices, i);
+        g_print("[AUDIO] capture[%u]: device=%s card_id=%s card_name=%s pcm_name=%s\n",
+                i,
+                dev->device ? dev->device : "(null)",
+                dev->card_id ? dev->card_id : "",
+                dev->card_name ? dev->card_name : "",
+                dev->pcm_name ? dev->pcm_name : "");
+    }
+
+    if (preferred_keyword && *preferred_keyword) {
+        for (guint i = 0; i < devices->len; ++i) {
+            AudioInputCandidate *dev = g_ptr_array_index(devices, i);
+            if (ascii_contains_ci(dev->device, preferred_keyword) ||
+                ascii_contains_ci(dev->card_id, preferred_keyword) ||
+                ascii_contains_ci(dev->card_name, preferred_keyword) ||
+                ascii_contains_ci(dev->pcm_name, preferred_keyword)) {
+                selected = g_strdup(dev->device);
+                reason = "matched preferred keyword";
+                break;
+            }
+        }
+    }
+
+    if (!selected && devices->len == 1) {
+        AudioInputCandidate *dev = g_ptr_array_index(devices, 0);
+        selected = g_strdup(dev->device);
+        reason = "only one capture device detected";
+    }
+
+    if (!selected) {
+        selected = g_strdup("default");
+        reason = "fallback to default";
+    }
+
+    g_print("[AUDIO] selected capture device: %s (%s)\n", selected, reason);
+    g_ptr_array_unref(devices);
+    return selected;
+}
 
 static gboolean device_exists(const gchar *path) {
     struct stat st;
@@ -162,6 +300,7 @@ static gboolean device_exists(const gchar *path) {
 
 static gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data) {
     GMainLoop *loop = (GMainLoop *)data;
+    (void)bus;
 
     switch (GST_MESSAGE_TYPE(msg)) {
         case GST_MESSAGE_EOS:
@@ -218,17 +357,26 @@ static gboolean bus_call(GstBus *bus, GstMessage *msg, gpointer data) {
     return TRUE;
 }
 
-
-static uint64_t push_mono_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
-
-
 // -------- Control server: accepts PAUSE/RESUME over TCP --------
+typedef enum {
+    CTRL_CMD_NONE = 0,
+    CTRL_CMD_PAUSE,
+    CTRL_CMD_RESUME,
+} ControlCommand;
+
+typedef struct ControlServer ControlServer;
+
 typedef struct {
+    ControlServer *cs;
+    ControlCommand cmd;
+    GMutex lock;
+    GCond cond;
+    gboolean done;
+    gboolean ok;
+    atomic_int ref_count;
+} ControlRequest;
+
+struct ControlServer {
     GstElement *pipeline;
     GstElement *vsel;
     GstElement *asel;
@@ -236,13 +384,168 @@ typedef struct {
     GstElement *venc;    // x264enc
     GstElement *vparse;  // h264parse
 
+    GMainContext *main_context;
+
     gint ctrl_port;
     pthread_t thread;
     int listen_fd;
-    gboolean stop;
+    atomic_bool stop;
 
-    gint64 last_resume_monotonic_us; // lastest RESUME time, in monotonic microseconds
-} ControlServer;
+    atomic_llong last_resume_monotonic_us; // latest RESUME time, monotonic us
+};
+
+static ControlRequest *control_request_new(ControlServer *cs, ControlCommand cmd) {
+    ControlRequest *req = g_new0(ControlRequest, 1);
+    if (!req) return NULL;
+
+    req->cs = cs;
+    req->cmd = cmd;
+    g_mutex_init(&req->lock);
+    g_cond_init(&req->cond);
+    atomic_init(&req->ref_count, 1);
+    return req;
+}
+
+static void control_request_ref(ControlRequest *req) {
+    if (!req) return;
+    atomic_fetch_add_explicit(&req->ref_count, 1, memory_order_relaxed);
+}
+
+static void control_request_unref(ControlRequest *req) {
+    if (!req) return;
+
+    if (atomic_fetch_sub_explicit(&req->ref_count, 1, memory_order_acq_rel) == 1) {
+        g_cond_clear(&req->cond);
+        g_mutex_clear(&req->lock);
+        g_free(req);
+    }
+}
+
+static gboolean selector_set_active_pad(GstElement *selector,
+                                        const gchar *pad_name,
+                                        const gchar *selector_name) {
+    if (!selector) return TRUE;
+
+    GstPad *pad = gst_element_get_static_pad(selector, pad_name);
+    if (!pad) {
+        g_printerr("[CTRL] failed to get %s:%s\n", selector_name, pad_name);
+        return FALSE;
+    }
+
+    g_object_set(selector, "active-pad", pad, NULL);
+    gst_object_unref(pad);
+    g_print("[CTRL] %s switched to %s\n", selector_name, pad_name);
+    return TRUE;
+}
+
+static gboolean send_upstream_force_key_unit(GstElement *vparse,
+                                             atomic_llong *last_resume_monotonic_us) {
+    if (!vparse) {
+        g_printerr("[CTRL] vparse is NULL\n");
+        return FALSE;
+    }
+
+    GstPad *src = gst_element_get_static_pad(vparse, "src");
+    if (!src) {
+        g_printerr("[CTRL] failed to get vparse:src\n");
+        return FALSE;
+    }
+
+    atomic_store_explicit(last_resume_monotonic_us,
+                          (long long)g_get_monotonic_time(),
+                          memory_order_relaxed);
+
+    GstEvent *force_kf = gst_video_event_new_upstream_force_key_unit(
+        GST_CLOCK_TIME_NONE,
+        TRUE,
+        0
+    );
+
+    gboolean ok = gst_pad_send_event(src, force_kf);
+    g_print("[CTRL] upstream force-key-unit sent from vparse:src result=%d\n", ok);
+
+    gst_object_unref(src);
+    return ok;
+}
+
+static gboolean apply_control_command_in_main(ControlServer *cs, ControlCommand cmd) {
+    gboolean ok = TRUE;
+
+    switch (cmd) {
+        case CTRL_CMD_PAUSE:
+            ok &= selector_set_active_pad(cs->vsel, "sink_1", "vsel");
+            ok &= selector_set_active_pad(cs->asel, "sink_1", "asel");
+            break;
+
+        case CTRL_CMD_RESUME:
+            ok &= selector_set_active_pad(cs->vsel, "sink_0", "vsel");
+            ok &= send_upstream_force_key_unit(cs->vparse, &cs->last_resume_monotonic_us);
+            ok &= selector_set_active_pad(cs->asel, "sink_0", "asel");
+            break;
+
+        default:
+            ok = FALSE;
+            break;
+    }
+
+    return ok;
+}
+
+static gboolean control_apply_in_main(gpointer user_data) {
+    ControlRequest *req = (ControlRequest *)user_data;
+    gboolean ok = apply_control_command_in_main(req->cs, req->cmd);
+
+    g_mutex_lock(&req->lock);
+    req->ok = ok;
+    req->done = TRUE;
+    g_cond_signal(&req->cond);
+    g_mutex_unlock(&req->lock);
+
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean control_execute_sync(ControlServer *cs,
+                                     ControlCommand cmd,
+                                     gint timeout_ms) {
+    if (!cs || !cs->main_context) {
+        g_printerr("[CTRL] main context is not available\n");
+        return FALSE;
+    }
+
+    ControlRequest *req = control_request_new(cs, cmd);
+    if (!req) {
+        g_printerr("[CTRL] failed to allocate control request\n");
+        return FALSE;
+    }
+
+    control_request_ref(req); // ownership transferred to the main-context callback
+    g_main_context_invoke_full(cs->main_context,
+                               G_PRIORITY_DEFAULT,
+                               control_apply_in_main,
+                               req,
+                               (GDestroyNotify)control_request_unref);
+
+    gboolean completed = FALSE;
+    gboolean ok = FALSE;
+    gint64 deadline_us = g_get_monotonic_time() + ((gint64)timeout_ms * 1000);
+
+    g_mutex_lock(&req->lock);
+    while (!req->done) {
+        if (!g_cond_wait_until(&req->cond, &req->lock, deadline_us)) {
+            break;
+        }
+    }
+    completed = req->done;
+    ok = req->ok;
+    g_mutex_unlock(&req->lock);
+
+    if (!completed) {
+        g_printerr("[CTRL] command timed out waiting for main loop\n");
+    }
+
+    control_request_unref(req);
+    return completed && ok;
+}
 
 static gboolean is_force_key_unit_event(GstEvent *ev) {
     if (!ev) return FALSE;
@@ -250,6 +553,8 @@ static gboolean is_force_key_unit_event(GstEvent *ev) {
 }
 
 static GstPadProbeReturn event_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    (void)user_data;
+
     if (!(GST_PAD_PROBE_INFO_TYPE(info) &
           (GST_PAD_PROBE_TYPE_EVENT_UPSTREAM | GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM))) {
         return GST_PAD_PROBE_OK;
@@ -334,17 +639,17 @@ static GstPadProbeReturn buffer_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpo
         return GST_PAD_PROBE_OK;
     }
 
-    if (cs->last_resume_monotonic_us <= 0) {
+    gint64 last_resume_us = (gint64)atomic_load_explicit(&cs->last_resume_monotonic_us,
+                                                         memory_order_relaxed);
+    if (last_resume_us <= 0) {
         return GST_PAD_PROBE_OK;
     }
 
     gint64 now_us = g_get_monotonic_time();
-    gint64 delta_us = now_us - cs->last_resume_monotonic_us;;
-
+    gint64 delta_us = now_us - last_resume_us;
 
     gboolean is_delta = GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT);
     gboolean is_header = GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_HEADER);
-
 
     if (delta_us >= 0 && delta_us <= 200000) {
         GstElement *parent = gst_pad_get_parent_element(pad);
@@ -403,7 +708,8 @@ static void *control_thread(void *arg) {
     int yes = 1;
     setsockopt(cs->listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-    struct sockaddr_in addr = {0};
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons((uint16_t)cs->ctrl_port);
@@ -416,7 +722,7 @@ static void *control_thread(void *arg) {
         return NULL;
     }
 
-    while (!cs->stop) {
+    while (!atomic_load_explicit(&cs->stop, memory_order_relaxed)) {
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(cs->listen_fd, &rfds);
@@ -432,66 +738,12 @@ static void *control_thread(void *arg) {
         ssize_t n = recv(client, buf, sizeof(buf) - 1, 0);
         if (n > 0) {
             if (!g_ascii_strncasecmp(buf, "PAUSE", 5)) {
-                if (cs->vsel) {
-                    GstPad *pad = gst_element_get_static_pad(cs->vsel, "sink_1");
-                    g_object_set(cs->vsel, "active-pad", pad, NULL);
-                    gst_object_unref(pad);
-                }
-                if (cs->asel) {
-                    GstPad *pad = gst_element_get_static_pad(cs->asel, "sink_1");
-                    g_object_set(cs->asel, "active-pad", pad, NULL);
-                    gst_object_unref(pad);
-                }
-                send(client, "OK\n", 3, 0);
+                gboolean ok = control_execute_sync(cs, CTRL_CMD_PAUSE, 2000);
+                send(client, ok ? "OK\n" : "ERR\n", 4, 0);
             } else if (!g_ascii_strncasecmp(buf, "RESUME", 6)) {
-                if (cs->vsel) {
-                    GstPad *pad0 = gst_element_get_static_pad(cs->vsel, "sink_0");
-                    if (pad0) {
-                        g_object_set(cs->vsel, "active-pad", pad0, NULL);
-                        gst_object_unref(pad0);
-                        g_print("[CTRL] vsel switched to sink_0\n");
-                    } else {
-                        g_printerr("[CTRL] failed to get vsel:sink_0\n");
-                    }
-
-                    GstPad *src = NULL;
-
-                    if (cs->vparse) {
-                        src = gst_element_get_static_pad(cs->vparse, "src");
-                    }
-
-                    if (src) {
-                        cs->last_resume_monotonic_us = g_get_monotonic_time();
-
-                        GstEvent *force_kf =
-                            gst_video_event_new_upstream_force_key_unit(
-                                GST_CLOCK_TIME_NONE,
-                                TRUE,
-                                0
-                            );
-
-                        gboolean ok = gst_pad_send_event(src, force_kf);
-                        g_print("[CTRL] upstream force-key-unit sent from vparse:src result=%d\n", ok);
-
-                        gst_object_unref(src);
-                    } else {
-                        g_printerr("[CTRL] failed to get vparse:src\n");
-                    }
-                }
-
-                if (cs->asel) {
-                    GstPad *pad0 = gst_element_get_static_pad(cs->asel, "sink_0");
-                    if (pad0) {
-                        g_object_set(cs->asel, "active-pad", pad0, NULL);
-                        gst_object_unref(pad0);
-                        g_print("[CTRL] asel switched to sink_0\n");
-                    } else {
-                        g_printerr("[CTRL] failed to get asel:sink_0\n");
-                    }
-                }
-
-                send(client, "OK\n", 3, 0);
-            }else {
+                gboolean ok = control_execute_sync(cs, CTRL_CMD_RESUME, 2000);
+                send(client, ok ? "OK\n" : "ERR\n", 4, 0);
+            } else {
                 send(client, "UNKNOWN\n", 8, 0);
             }
         }
@@ -539,32 +791,41 @@ static void install_video_debug_probes(ControlServer *cs) {
                      buffer_probe_cb, cs);
 }
 
-static gboolean start_control_server(ControlServer *cs, GstElement *pipeline, gint port) {
+static gboolean start_control_server(ControlServer *cs,
+                                     GstElement *pipeline,
+                                     GMainContext *main_context,
+                                     gint port) {
     cs->pipeline = pipeline;
     cs->vsel = gst_bin_get_by_name(GST_BIN(pipeline), "vsel");
     cs->asel = gst_bin_get_by_name(GST_BIN(pipeline), "asel");
     cs->venc = gst_bin_get_by_name(GST_BIN(pipeline), "venc");
     cs->vparse = gst_bin_get_by_name(GST_BIN(pipeline), "vparse");
+    cs->main_context = main_context ? g_main_context_ref(main_context) : NULL;
 
     cs->ctrl_port = port;
-    cs->stop = FALSE;
     cs->listen_fd = -1;
-    cs->last_resume_monotonic_us = 0;
+    atomic_init(&cs->stop, false);
+    atomic_init(&cs->last_resume_monotonic_us, 0);
 
     install_video_debug_probes(cs);
 
     if (pthread_create(&cs->thread, NULL, control_thread, cs) != 0) {
         g_printerr("control: failed to create thread\n");
+        if (cs->main_context) {
+            g_main_context_unref(cs->main_context);
+            cs->main_context = NULL;
+        }
         return FALSE;
     }
     return TRUE;
 }
 
 static void stop_control_server(ControlServer *cs) {
-    cs->stop = TRUE;
+    atomic_store_explicit(&cs->stop, true, memory_order_relaxed);
 
     if (cs->listen_fd >= 0) {
         close(cs->listen_fd);
+        cs->listen_fd = -1;
     }
 
     if (cs->thread) {
@@ -575,6 +836,7 @@ static void stop_control_server(ControlServer *cs) {
     if (cs->asel) gst_object_unref(cs->asel);
     if (cs->venc) gst_object_unref(cs->venc);
     if (cs->vparse) gst_object_unref(cs->vparse);
+    if (cs->main_context) g_main_context_unref(cs->main_context);
 }
 
 int main(int argc, char *argv[]) {
@@ -582,7 +844,9 @@ int main(int argc, char *argv[]) {
     GstBus *bus = NULL;
     GMainLoop *loop = NULL;
     GError *error = NULL;
-    ControlServer ctrl = {0};
+    gchar *resolved_audio_device = NULL;
+    ControlServer ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
 
     const AppConfig *cfg = &kAppConfig;
 
@@ -595,6 +859,10 @@ int main(int argc, char *argv[]) {
     }
 
     g_print("Using camera device: %s\n", cfg->device_path);
+
+    if (cfg->audio_enabled) {
+        resolved_audio_device = resolve_audio_device(cfg->audio_device);
+    }
 
     GString *pipeline_desc = g_string_new(NULL);
 
@@ -670,7 +938,7 @@ int main(int argc, char *argv[]) {
             pipeline_desc,
             " alsasrc device=%s ! audioresample ! audioconvert ! "
             "audio/x-raw,rate=%d,channels=2 ! queue ! asel.sink_0 ",
-            cfg->audio_device,
+            resolved_audio_device,
             audio_rate
         );
 
@@ -693,14 +961,16 @@ int main(int argc, char *argv[]) {
         g_printerr("Failed to create pipeline: %s\n",
                    error ? error->message : "unknown");
         g_clear_error(&error);
+        g_free(resolved_audio_device);
         return 2;
     }
 
     loop = g_main_loop_new(NULL, FALSE);
     bus = gst_element_get_bus(pipeline);
     gst_bus_add_watch(bus, bus_call, loop);
-   
-    TelemetryInjectCtx tlmy_inject = {0};
+
+    TelemetryInjectCtx tlmy_inject;
+    memset(&tlmy_inject, 0, sizeof(tlmy_inject));
     tlmy_inject.next_inject_at = TLMY_TS_INTERVAL;
 
     if (!install_tlmy_injector(pipeline, &tlmy_inject)) {
@@ -710,16 +980,53 @@ int main(int argc, char *argv[]) {
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
         g_printerr("Failed to set pipeline to PLAYING\n");
+
+        GstMessage *msg = gst_bus_timed_pop_filtered(
+            bus,
+            3 * GST_SECOND,
+            (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_WARNING)
+        );
+
+        if (msg) {
+            GError *err = NULL;
+            gchar *debug = NULL;
+
+            if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
+                gst_message_parse_error(msg, &err, &debug);
+                g_printerr("ERROR from %s: %s\n",
+                        GST_OBJECT_NAME(msg->src),
+                        err ? err->message : "unknown");
+            } else {
+                gst_message_parse_warning(msg, &err, &debug);
+                g_printerr("WARNING from %s: %s\n",
+                        GST_OBJECT_NAME(msg->src),
+                        err ? err->message : "unknown");
+            }
+
+            if (debug) {
+                g_printerr("Debug details: %s\n", debug);
+            }
+
+            g_clear_error(&err);
+            g_free(debug);
+            gst_message_unref(msg);
+        } else {
+            g_printerr("No detailed bus message received within timeout\n");
+        }
+
         gst_object_unref(bus);
         gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(pipeline);
         g_main_loop_unref(loop);
+        g_free(resolved_audio_device);
         return 3;
     }
-
     g_print("Streaming started.\n");
 
-    if (!start_control_server(&ctrl, pipeline, cfg->ctrl_port)) {
+    if (!start_control_server(&ctrl,
+                              pipeline,
+                              g_main_loop_get_context(loop),
+                              cfg->ctrl_port)) {
         g_printerr("Warning: control server not running\n");
     } else {
         g_print("Control server listening on %d (PAUSE/RESUME)\n", cfg->ctrl_port);
@@ -734,6 +1041,7 @@ int main(int argc, char *argv[]) {
     gst_object_unref(bus);
     gst_object_unref(pipeline);
     g_main_loop_unref(loop);
+    g_free(resolved_audio_device);
 
     return 0;
 }
