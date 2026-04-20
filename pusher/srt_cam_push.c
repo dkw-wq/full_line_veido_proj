@@ -362,13 +362,35 @@ typedef enum {
     CTRL_CMD_NONE = 0,
     CTRL_CMD_PAUSE,
     CTRL_CMD_RESUME,
+    CTRL_CMD_IDR,
+    CTRL_CMD_SET_BITRATE,
+    CTRL_CMD_SET_FPS,
+    CTRL_CMD_SET_RESOLUTION,
+    CTRL_CMD_VIDEO_MODE,
+    CTRL_CMD_AUDIO_MODE,
 } ControlCommand;
+
+typedef enum {
+    CTRL_MODE_NONE = 0,
+    CTRL_MODE_NORMAL,
+    CTRL_MODE_BLACK,
+    CTRL_MODE_SILENT,
+} ControlMode;
+
+typedef struct {
+    ControlCommand cmd;
+    gint bitrate_kbps;
+    gint fps;
+    gint width;
+    gint height;
+    ControlMode mode;
+} ControlCommandSpec;
 
 typedef struct ControlServer ControlServer;
 
 typedef struct {
     ControlServer *cs;
-    ControlCommand cmd;
+    ControlCommandSpec spec;
     GMutex lock;
     GCond cond;
     gboolean done;
@@ -383,6 +405,8 @@ struct ControlServer {
 
     GstElement *venc;    // x264enc
     GstElement *vparse;  // h264parse
+    GstElement *vcaps;   // live camera raw caps
+    GstElement *blackcaps;
 
     GMainContext *main_context;
 
@@ -392,14 +416,18 @@ struct ControlServer {
     atomic_bool stop;
 
     atomic_llong last_resume_monotonic_us; // latest RESUME time, monotonic us
+    atomic_int current_width;
+    atomic_int current_height;
+    atomic_int current_fps;
+    atomic_int current_bitrate_kbps;
 };
 
-static ControlRequest *control_request_new(ControlServer *cs, ControlCommand cmd) {
+static ControlRequest *control_request_new(ControlServer *cs, ControlCommandSpec spec) {
     ControlRequest *req = g_new0(ControlRequest, 1);
     if (!req) return NULL;
 
     req->cs = cs;
-    req->cmd = cmd;
+    req->spec = spec;
     g_mutex_init(&req->lock);
     g_cond_init(&req->cond);
     atomic_init(&req->ref_count, 1);
@@ -439,7 +467,7 @@ static gboolean selector_set_active_pad(GstElement *selector,
 }
 
 static gboolean send_upstream_force_key_unit(GstElement *vparse,
-                                             atomic_llong *last_resume_monotonic_us) {
+                                              atomic_llong *last_resume_monotonic_us) {
     if (!vparse) {
         g_printerr("[CTRL] vparse is NULL\n");
         return FALSE;
@@ -468,19 +496,125 @@ static gboolean send_upstream_force_key_unit(GstElement *vparse,
     return ok;
 }
 
-static gboolean apply_control_command_in_main(ControlServer *cs, ControlCommand cmd) {
+static gboolean set_video_caps_filter(GstElement *filter,
+                                       const gchar *name,
+                                       gint width,
+                                       gint height,
+                                       gint fps) {
+    if (!filter) {
+        g_printerr("[CTRL] capsfilter %s is NULL\n", name);
+        return FALSE;
+    }
+
+    GstCaps *caps = gst_caps_new_simple(
+        "video/x-raw",
+        "width", G_TYPE_INT, width,
+        "height", G_TYPE_INT, height,
+        "framerate", GST_TYPE_FRACTION, fps, 1,
+        NULL
+    );
+    if (!caps) {
+        g_printerr("[CTRL] failed to allocate caps for %s\n", name);
+        return FALSE;
+    }
+
+    g_object_set(filter, "caps", caps, NULL);
+    gst_caps_unref(caps);
+    g_print("[CTRL] %s caps set to %dx%d@%d\n", name, width, height, fps);
+    return TRUE;
+}
+
+static gboolean apply_current_video_caps(ControlServer *cs) {
+    gint width = atomic_load_explicit(&cs->current_width, memory_order_relaxed);
+    gint height = atomic_load_explicit(&cs->current_height, memory_order_relaxed);
+    gint fps = atomic_load_explicit(&cs->current_fps, memory_order_relaxed);
+
+    gboolean ok = TRUE;
+    ok &= set_video_caps_filter(cs->vcaps, "vcaps", width, height, fps);
+    ok &= set_video_caps_filter(cs->blackcaps, "blackcaps", width, height, fps);
+    return ok;
+}
+
+static gboolean set_encoder_bitrate(ControlServer *cs, gint bitrate_kbps) {
+    if (!cs->venc || bitrate_kbps <= 0) {
+        g_printerr("[CTRL] invalid bitrate request: %d\n", bitrate_kbps);
+        return FALSE;
+    }
+
+    g_object_set(cs->venc, "bitrate", bitrate_kbps, NULL);
+    atomic_store_explicit(&cs->current_bitrate_kbps, bitrate_kbps, memory_order_relaxed);
+    g_print("[CTRL] encoder bitrate set to %d kbps\n", bitrate_kbps);
+    return TRUE;
+}
+
+static gboolean set_video_mode(ControlServer *cs, ControlMode mode) {
+    if (mode == CTRL_MODE_BLACK) {
+        return selector_set_active_pad(cs->vsel, "sink_1", "vsel");
+    }
+    if (mode == CTRL_MODE_NORMAL) {
+        return selector_set_active_pad(cs->vsel, "sink_0", "vsel");
+    }
+    return FALSE;
+}
+
+static gboolean set_audio_mode(ControlServer *cs, ControlMode mode) {
+    if (mode == CTRL_MODE_SILENT) {
+        return selector_set_active_pad(cs->asel, "sink_1", "asel");
+    }
+    if (mode == CTRL_MODE_NORMAL) {
+        return selector_set_active_pad(cs->asel, "sink_0", "asel");
+    }
+    return FALSE;
+}
+
+static gboolean apply_control_command_in_main(ControlServer *cs, const ControlCommandSpec *spec) {
     gboolean ok = TRUE;
 
-    switch (cmd) {
+    switch (spec->cmd) {
         case CTRL_CMD_PAUSE:
-            ok &= selector_set_active_pad(cs->vsel, "sink_1", "vsel");
-            ok &= selector_set_active_pad(cs->asel, "sink_1", "asel");
+            ok &= set_video_mode(cs, CTRL_MODE_BLACK);
+            ok &= set_audio_mode(cs, CTRL_MODE_SILENT);
             break;
 
         case CTRL_CMD_RESUME:
-            ok &= selector_set_active_pad(cs->vsel, "sink_0", "vsel");
+            ok &= set_video_mode(cs, CTRL_MODE_NORMAL);
             ok &= send_upstream_force_key_unit(cs->vparse, &cs->last_resume_monotonic_us);
-            ok &= selector_set_active_pad(cs->asel, "sink_0", "asel");
+            ok &= set_audio_mode(cs, CTRL_MODE_NORMAL);
+            break;
+
+        case CTRL_CMD_IDR:
+            ok &= send_upstream_force_key_unit(cs->vparse, &cs->last_resume_monotonic_us);
+            break;
+
+        case CTRL_CMD_SET_BITRATE:
+            ok &= set_encoder_bitrate(cs, spec->bitrate_kbps);
+            break;
+
+        case CTRL_CMD_SET_FPS:
+            if (spec->fps <= 0) {
+                ok = FALSE;
+                break;
+            }
+            atomic_store_explicit(&cs->current_fps, spec->fps, memory_order_relaxed);
+            ok &= apply_current_video_caps(cs);
+            break;
+
+        case CTRL_CMD_SET_RESOLUTION:
+            if (spec->width <= 0 || spec->height <= 0) {
+                ok = FALSE;
+                break;
+            }
+            atomic_store_explicit(&cs->current_width, spec->width, memory_order_relaxed);
+            atomic_store_explicit(&cs->current_height, spec->height, memory_order_relaxed);
+            ok &= apply_current_video_caps(cs);
+            break;
+
+        case CTRL_CMD_VIDEO_MODE:
+            ok &= set_video_mode(cs, spec->mode);
+            break;
+
+        case CTRL_CMD_AUDIO_MODE:
+            ok &= set_audio_mode(cs, spec->mode);
             break;
 
         default:
@@ -493,7 +627,7 @@ static gboolean apply_control_command_in_main(ControlServer *cs, ControlCommand 
 
 static gboolean control_apply_in_main(gpointer user_data) {
     ControlRequest *req = (ControlRequest *)user_data;
-    gboolean ok = apply_control_command_in_main(req->cs, req->cmd);
+    gboolean ok = apply_control_command_in_main(req->cs, &req->spec);
 
     g_mutex_lock(&req->lock);
     req->ok = ok;
@@ -505,14 +639,14 @@ static gboolean control_apply_in_main(gpointer user_data) {
 }
 
 static gboolean control_execute_sync(ControlServer *cs,
-                                     ControlCommand cmd,
+                                     ControlCommandSpec spec,
                                      gint timeout_ms) {
     if (!cs || !cs->main_context) {
         g_printerr("[CTRL] main context is not available\n");
         return FALSE;
     }
 
-    ControlRequest *req = control_request_new(cs, cmd);
+    ControlRequest *req = control_request_new(cs, spec);
     if (!req) {
         g_printerr("[CTRL] failed to allocate control request\n");
         return FALSE;
@@ -697,6 +831,9 @@ static void add_probe_to_pad(GstElement *elem,
     gst_object_unref(pad);
 }
 
+static gboolean parse_control_command(char *line, ControlCommandSpec *out);
+static void send_control_reply(int client, const char *text);
+
 static void *control_thread(void *arg) {
     ControlServer *cs = (ControlServer *)arg;
     cs->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -734,17 +871,15 @@ static void *control_thread(void *arg) {
         int client = accept(cs->listen_fd, NULL, NULL);
         if (client < 0) continue;
 
-        char buf[64] = {0};
+        char buf[128] = {0};
         ssize_t n = recv(client, buf, sizeof(buf) - 1, 0);
         if (n > 0) {
-            if (!g_ascii_strncasecmp(buf, "PAUSE", 5)) {
-                gboolean ok = control_execute_sync(cs, CTRL_CMD_PAUSE, 2000);
-                send(client, ok ? "OK\n" : "ERR\n", 4, 0);
-            } else if (!g_ascii_strncasecmp(buf, "RESUME", 6)) {
-                gboolean ok = control_execute_sync(cs, CTRL_CMD_RESUME, 2000);
-                send(client, ok ? "OK\n" : "ERR\n", 4, 0);
+            ControlCommandSpec spec;
+            if (parse_control_command(buf, &spec)) {
+                gboolean ok = control_execute_sync(cs, spec, 2000);
+                send_control_reply(client, ok ? "OK\n" : "ERR\n");
             } else {
-                send(client, "UNKNOWN\n", 8, 0);
+                send_control_reply(client, "UNKNOWN\n");
             }
         }
 
@@ -791,21 +926,126 @@ static void install_video_debug_probes(ControlServer *cs) {
                      buffer_probe_cb, cs);
 }
 
+static ControlCommandSpec control_spec(ControlCommand cmd) {
+    ControlCommandSpec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.cmd = cmd;
+    return spec;
+}
+
+static gboolean parse_resolution_token(const char *a, const char *b, gint *width, gint *height) {
+    if (!a || !width || !height) return FALSE;
+
+    int w = 0;
+    int h = 0;
+    if (strchr(a, 'x') || strchr(a, 'X')) {
+        if (sscanf(a, "%dx%d", &w, &h) != 2 &&
+            sscanf(a, "%dX%d", &w, &h) != 2) {
+            return FALSE;
+        }
+    } else {
+        if (!b) return FALSE;
+        w = atoi(a);
+        h = atoi(b);
+    }
+
+    if (w <= 0 || h <= 0) return FALSE;
+    *width = (gint)w;
+    *height = (gint)h;
+    return TRUE;
+}
+
+static gboolean parse_control_command(char *line, ControlCommandSpec *out) {
+    if (!line || !out) return FALSE;
+
+    char *trimmed = g_strstrip(line);
+    char cmd[32] = {0};
+    char a[32] = {0};
+    char b[32] = {0};
+    int parts = sscanf(trimmed, "%31s %31s %31s", cmd, a, b);
+    if (parts <= 0) return FALSE;
+
+    if (!g_ascii_strcasecmp(cmd, "PAUSE")) {
+        *out = control_spec(CTRL_CMD_PAUSE);
+        return TRUE;
+    }
+    if (!g_ascii_strcasecmp(cmd, "RESUME")) {
+        *out = control_spec(CTRL_CMD_RESUME);
+        return TRUE;
+    }
+    if (!g_ascii_strcasecmp(cmd, "IDR")) {
+        *out = control_spec(CTRL_CMD_IDR);
+        return TRUE;
+    }
+    if (!g_ascii_strcasecmp(cmd, "SET_BITRATE") && parts >= 2) {
+        *out = control_spec(CTRL_CMD_SET_BITRATE);
+        out->bitrate_kbps = atoi(a);
+        return out->bitrate_kbps > 0;
+    }
+    if (!g_ascii_strcasecmp(cmd, "SET_FPS") && parts >= 2) {
+        *out = control_spec(CTRL_CMD_SET_FPS);
+        out->fps = atoi(a);
+        return out->fps > 0;
+    }
+    if (!g_ascii_strcasecmp(cmd, "SET_RESOLUTION") && parts >= 2) {
+        *out = control_spec(CTRL_CMD_SET_RESOLUTION);
+        return parse_resolution_token(a, parts >= 3 ? b : NULL, &out->width, &out->height);
+    }
+    if (!g_ascii_strcasecmp(cmd, "VIDEO_MODE") && parts >= 2) {
+        *out = control_spec(CTRL_CMD_VIDEO_MODE);
+        if (!g_ascii_strcasecmp(a, "BLACK")) {
+            out->mode = CTRL_MODE_BLACK;
+            return TRUE;
+        }
+        if (!g_ascii_strcasecmp(a, "NORMAL")) {
+            out->mode = CTRL_MODE_NORMAL;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    if (!g_ascii_strcasecmp(cmd, "AUDIO_MODE") && parts >= 2) {
+        *out = control_spec(CTRL_CMD_AUDIO_MODE);
+        if (!g_ascii_strcasecmp(a, "SILENT")) {
+            out->mode = CTRL_MODE_SILENT;
+            return TRUE;
+        }
+        if (!g_ascii_strcasecmp(a, "NORMAL")) {
+            out->mode = CTRL_MODE_NORMAL;
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    return FALSE;
+}
+
+static void send_control_reply(int client, const char *text) {
+    if (!text) return;
+    send(client, text, strlen(text), 0);
+}
+
 static gboolean start_control_server(ControlServer *cs,
-                                     GstElement *pipeline,
-                                     GMainContext *main_context,
-                                     gint port) {
+                                      GstElement *pipeline,
+                                      GMainContext *main_context,
+                                      gint port,
+                                      const AppConfig *cfg) {
     cs->pipeline = pipeline;
     cs->vsel = gst_bin_get_by_name(GST_BIN(pipeline), "vsel");
     cs->asel = gst_bin_get_by_name(GST_BIN(pipeline), "asel");
     cs->venc = gst_bin_get_by_name(GST_BIN(pipeline), "venc");
     cs->vparse = gst_bin_get_by_name(GST_BIN(pipeline), "vparse");
+    cs->vcaps = gst_bin_get_by_name(GST_BIN(pipeline), "vcaps");
+    cs->blackcaps = gst_bin_get_by_name(GST_BIN(pipeline), "blackcaps");
     cs->main_context = main_context ? g_main_context_ref(main_context) : NULL;
 
     cs->ctrl_port = port;
     cs->listen_fd = -1;
     atomic_init(&cs->stop, false);
     atomic_init(&cs->last_resume_monotonic_us, 0);
+    atomic_init(&cs->current_width, cfg ? cfg->width : 1280);
+    atomic_init(&cs->current_height, cfg ? cfg->height : 720);
+    atomic_init(&cs->current_fps, cfg ? cfg->fps : 25);
+    atomic_init(&cs->current_bitrate_kbps, cfg ? cfg->bitrate_kbps : 2000);
 
     install_video_debug_probes(cs);
 
@@ -836,6 +1076,8 @@ static void stop_control_server(ControlServer *cs) {
     if (cs->asel) gst_object_unref(cs->asel);
     if (cs->venc) gst_object_unref(cs->venc);
     if (cs->vparse) gst_object_unref(cs->vparse);
+    if (cs->vcaps) gst_object_unref(cs->vcaps);
+    if (cs->blackcaps) gst_object_unref(cs->blackcaps);
     if (cs->main_context) g_main_context_unref(cs->main_context);
 }
 
@@ -891,8 +1133,8 @@ int main(int argc, char *argv[]) {
         pipeline_desc,
         "v4l2src device=%s ! "
         "image/jpeg,width=%d,height=%d,framerate=%d/1 ! "
-        "jpegdec ! videoconvert ! "
-        "video/x-raw,width=%d,height=%d,framerate=%d/1 ! "
+        "jpegdec ! videoconvert ! videorate ! videoscale ! "
+        "capsfilter name=vcaps caps=\"video/x-raw,width=(int)%d,height=(int)%d,framerate=(fraction)%d/1\" ! "
         "queue ! vsel.sink_0 ",
         cfg->device_path,
         cfg->width,
@@ -906,7 +1148,8 @@ int main(int argc, char *argv[]) {
     g_string_append_printf(
         pipeline_desc,
         "videotestsrc pattern=black is-live=true ! "
-        "video/x-raw,width=%d,height=%d,framerate=%d/1 ! "
+        "videorate ! videoscale ! "
+        "capsfilter name=blackcaps caps=\"video/x-raw,width=(int)%d,height=(int)%d,framerate=(fraction)%d/1\" ! "
         "queue ! vsel.sink_1 ",
         cfg->width,
         cfg->height,
@@ -1024,12 +1267,13 @@ int main(int argc, char *argv[]) {
     g_print("Streaming started.\n");
 
     if (!start_control_server(&ctrl,
-                              pipeline,
-                              g_main_loop_get_context(loop),
-                              cfg->ctrl_port)) {
+                               pipeline,
+                               g_main_loop_get_context(loop),
+                               cfg->ctrl_port,
+                               cfg)) {
         g_printerr("Warning: control server not running\n");
     } else {
-        g_print("Control server listening on %d (PAUSE/RESUME)\n", cfg->ctrl_port);
+        g_print("Control server listening on %d (PAUSE/RESUME/IDR/SET_*)\n", cfg->ctrl_port);
     }
 
     g_main_loop_run(loop);

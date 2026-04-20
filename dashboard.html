@@ -318,6 +318,25 @@
   </div>
 </div>
 
+<div class="grid-4" style="margin-bottom:16px">
+  <div class="metric-card">
+    <div class="label">全局状态</div>
+    <div class="value" id="m-gstate"><span class="badge badge-gray">Normal</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">全局动作</div>
+    <div class="value" id="m-gaction"><span class="badge badge-gray">NOOP</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">坏端比例</div>
+    <div class="value" id="m-badratio">—<span class="unit">%</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">当前档位</div>
+    <div class="value mono" id="m-ladder" style="font-size:16px">—</div>
+  </div>
+</div>
+
 <div class="card">
   <div class="legend">
     <span><span class="legend-dot" style="background:#378add"></span>入流 Mbps</span>
@@ -447,6 +466,16 @@ function updateChart(inHist, outHist) {
   chart.update('none');
 }
 
+function ctrlBadge(ctrl) {
+  switch (ctrl) {
+    case 'NORMAL': return 'badge badge-green';
+    case 'WARN': return 'badge badge-amber';
+    case 'DROP': return 'badge badge-red';
+    case 'PLACEHOLDER': return 'badge badge-red';
+    default: return 'badge badge-gray';
+  }
+}
+
 function renderSubs(list) {
   const wrap = $('sub-table-wrap');
   if (!list || list.length === 0) {
@@ -463,6 +492,7 @@ function renderSubs(list) {
     + '<th>Relay→ACK</th>'
     + '<th>Push→ACK</th>'
     + '<th>队列深度</th>'
+    + '<th>控制</th>'
     + '<th>ACK 新鲜度</th>'
     + '<th>空闲</th>'
     + '</tr></thead><tbody>';
@@ -483,6 +513,7 @@ function renderSubs(list) {
       <td><span class="badge badge-amber">${(s.telemetry_relay_to_ack_ms != null && s.telemetry_relay_to_ack_ms >= 0) ? fmt(s.telemetry_relay_to_ack_ms, 2) + ' ms' : '—'}</span></td>
       <td><span class="badge badge-green">${(s.telemetry_push_to_ack_ms != null && s.telemetry_push_to_ack_ms >= 0) ? fmt(s.telemetry_push_to_ack_ms, 2) + ' ms' : '—'}</span></td>
       <td>${s.q}</td>
+      <td><span class="${ctrlBadge(s.ctrl)}">${s.ctrl || 'NORMAL'}</span></td>
       <td><span class="${ackFreshCls}">${fmtMs(s.telemetry_last_ack_ms)}</span></td>
       <td><span class="${idleCls}">${fmtMs(idle)}</span></td>
     </tr>`;
@@ -522,6 +553,11 @@ function handleMsg(data) {
   $('m-p2r').innerHTML = fmt(d.dash_push_to_relay_ms, 2) + '<span class="unit">ms</span>';
   $('m-r2a').innerHTML = fmt(d.dash_relay_to_ack_ms, 2) + '<span class="unit">ms</span>';
   $('m-p2a').innerHTML = fmt(d.dash_push_to_ack_ms, 2) + '<span class="unit">ms</span>';
+  $('m-gstate').innerHTML = `<span class="${ctrlBadge(d.global_state === 'Normal' ? 'NORMAL' : 'WARN')}">${d.global_state || 'Normal'}</span>`;
+  $('m-gaction').innerHTML = `<span class="${ctrlBadge(d.global_action === 'NOOP' ? 'NORMAL' : 'WARN')}">${d.global_action || 'NOOP'}</span>`;
+  $('m-badratio').innerHTML = fmt((d.bad_subscriber_ratio || 0) * 100, 1) + '<span class="unit">%</span>';
+  $('m-ladder').textContent =
+    `${d.global_bitrate_kbps || '?'}kbps ${d.global_fps || '?'}fps ${d.global_width || '?'}x${d.global_height || '?'}`;
 
   let dashAckFresh = -1;
   if (d.sub_list && d.sub_list.length > 0) {
