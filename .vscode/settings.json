@@ -3,5 +3,6 @@
     "CMAKE_TOOLCHAIN_FILE": "C:/Users/dkw/vcpkg/scripts/buildsystems/vcpkg.cmake"
   },
   "cmake.generator": "Ninja",
-  "cmake.sourceDirectory": "C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/Qt_demo"
+  "cmake.sourceDirectory": "C:/Users/dkw/.a_dkwrtc/full_line_veido_proj/observer",
+  "cmake.ignoreCMakeListsMissing": true
 }

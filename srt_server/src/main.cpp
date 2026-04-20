@@ -41,11 +41,6 @@
 
 #include "telemetry.h"
 
-namespace {
-
-static void dump_srt_latency(const char* tag, SRTSOCKET s);
-
-}
 
 namespace ws_util {
 
@@ -194,6 +189,22 @@ std::string sockaddr_to_string(const sockaddr_in& a) {
 
 int64_t steady_ms() {
     return std::chrono::duration_cast<Ms>(Clock::now().time_since_epoch()).count();
+}
+
+static void dump_srt_latency(const char* tag, SRTSOCKET s) {
+    int v = 0;
+    int l = sizeof(v);
+
+    if (srt_getsockflag(s, SRTO_RCVLATENCY, &v, &l) == 0)
+        log_line("INFO", std::string(tag) + " RCVLATENCY=" + std::to_string(v));
+
+    l = sizeof(v);
+    if (srt_getsockflag(s, SRTO_PEERLATENCY, &v, &l) == 0)
+        log_line("INFO", std::string(tag) + " PEERLATENCY=" + std::to_string(v));
+
+    l = sizeof(v);
+    if (srt_getsockflag(s, SRTO_LATENCY, &v, &l) == 0)
+        log_line("INFO", std::string(tag) + " LATENCY=" + std::to_string(v));
 }
 
 struct Config {
@@ -1158,25 +1169,6 @@ void sig_handler(int) { g_running.store(false); }
 
 } // namespace
 
-namespace {
-
-static void dump_srt_latency(const char* tag, SRTSOCKET s) {
-    int v = 0;
-    int l = sizeof(v);
-
-    if (srt_getsockflag(s, SRTO_RCVLATENCY, &v, &l) == 0)
-        log_line("INFO", std::string(tag) + " RCVLATENCY=" + std::to_string(v));
-
-    l = sizeof(v);
-    if (srt_getsockflag(s, SRTO_PEERLATENCY, &v, &l) == 0)
-        log_line("INFO", std::string(tag) + " PEERLATENCY=" + std::to_string(v));
-
-    l = sizeof(v);
-    if (srt_getsockflag(s, SRTO_LATENCY, &v, &l) == 0)
-        log_line("INFO", std::string(tag) + " LATENCY=" + std::to_string(v));
-}
-
-}
 
 int main(int argc, char** argv) {
     std::signal(SIGINT,  sig_handler);
