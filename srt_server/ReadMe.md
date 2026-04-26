@@ -7,6 +7,9 @@ cmake -S . -B build
 cmake --build build -j4
 ./build/srt_relay_server --bind 0.0.0.0 --pub-port 9000 --sub-port 9001
 
+或在上一级目录执行:
+cmake -S srt_server -B srt_server/build
+cmake --build srt_server/build 
 
 srt代码运行检查实验指令:
 推流/拉流命令继续用这组：

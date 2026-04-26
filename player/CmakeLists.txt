@@ -16,6 +16,13 @@ set(FFMPEG_LIB_DIR "${FFMPEG_ROOT}/lib")
 
 add_executable(srt_player
     main.cpp
+    PlayerStatus.h
+    PlayerUi.h
+    FFmpegUtil.h
+    AudioPipeline.h
+    VideoPipeline.h
+    FFmpegD3D11Player.h
+    SrtUrl.h
     D3D11Renderer.cpp
     ControlClient.cpp
     Recorder.cpp

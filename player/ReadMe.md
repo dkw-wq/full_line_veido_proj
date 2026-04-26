@@ -18,7 +18,7 @@ PS C:\Users\dkw\.a_dkwrtc\full_line_veido_proj> cmake -S player -B player/build 
 cmake --build player/build --config Release
 
 3.
-.\player\build\Release\srt_player.exe "srt://10.160.196.17:9001?mode=caller&latency=20&streamid=cam1" 
+.\player\build\Release\srt_player.exe "srt://10.158.134.17:9001?mode=caller&latency=20&streamid=cam1" 
 
 ```
 

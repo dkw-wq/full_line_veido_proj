@@ -1,13 +1,26 @@
 
-```编译运行指令:
+```bash
+编译运行指令:
 
-gcc srt_cam_push.c -o srt_cam_push \
+cmake -S pusher -B pusher/build
+cmake --build pusher/build -j4
+
+./pusher/build/srt_cam_push
+
+也可以直接用 gcc 编译多源文件：
+
+gcc \
+  pusher/srt_cam_push.c \
+  pusher/app_config.c \
+  pusher/audio_device.c \
+  pusher/control_server.c \
+  pusher/gst_runtime.c \
+  pusher/telemetry_injector.c \
+  -o pusher/srt_cam_push \
   $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-video-1.0 glib-2.0) \
   -lasound -lpthread
 
-./srt_cam_push 
-
-
+./pusher/srt_cam_push
 ```
 
 # Pusher README
