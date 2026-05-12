@@ -6,11 +6,11 @@ Windows上编译运行顺序:
 (1)
 PS C:\Users\dkw\.a_dkwrtc\full_line_veido_proj> cmake -S player -B player/build `
    -G "Visual Studio 17 2022" -A x64 `
-   -DCMAKE_TOOLCHAIN_FILE=D:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+   -DCMAKE_TOOLCHAIN_FILE=E:/vcpkg/scripts/buildsystems/vcpkg.cmake `
    -DVCPKG_TARGET_TRIPLET=x64-windows
 
 (2)
-& "D:vcpkg\installed\x64-windows\tools\Qt6\bin\windeployqt.exe" --release player\build\Release\srt_player.exe
+& "E:\vcpkg\installed\x64-windows\tools\Qt6\bin\windeployqt.exe" --release player\build\Release\srt_player.exe
 
 //"(2)"运行一次即可，注意编译时把vcpkg等路径换成自己电脑里的文件路径
 

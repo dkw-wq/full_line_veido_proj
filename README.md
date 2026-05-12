@@ -145,7 +145,7 @@ gcc srt_cam_push.c -o srt_cam_push \
 编译:
 cmake -S player -B player/build `
    -G "Visual Studio 17 2022" -A x64 `
-   -DCMAKE_TOOLCHAIN_FILE=D:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+   -DCMAKE_TOOLCHAIN_FILE=E:/vcpkg/scripts/buildsystems/vcpkg.cmake `
    -DVCPKG_TARGET_TRIPLET=x64-windows
 
 ```

@@ -10,7 +10,18 @@ set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 COMPONENTS Widgets Multimedia REQUIRED)
 
-set(FFMPEG_ROOT "D:/vcpkg/installed/x64-windows")
+if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+    set(VCPKG_TARGET_TRIPLET "x64-windows")
+endif()
+
+if(DEFINED VCPKG_INSTALLED_DIR)
+    set(FFMPEG_ROOT "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+else()
+    get_filename_component(VCPKG_TOOLCHAIN_DIR "${CMAKE_TOOLCHAIN_FILE}" DIRECTORY)
+    get_filename_component(VCPKG_ROOT "${VCPKG_TOOLCHAIN_DIR}/../.." ABSOLUTE)
+    set(FFMPEG_ROOT "${VCPKG_ROOT}/installed/${VCPKG_TARGET_TRIPLET}")
+endif()
+
 set(FFMPEG_INCLUDE_DIR "${FFMPEG_ROOT}/include")
 set(FFMPEG_LIB_DIR "${FFMPEG_ROOT}/lib")
 

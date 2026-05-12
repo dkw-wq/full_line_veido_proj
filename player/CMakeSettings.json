@@ -10,7 +10,7 @@
         "value": "x64"
       },
       "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "D:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        "CMAKE_TOOLCHAIN_FILE": "E:/vcpkg/scripts/buildsystems/vcpkg.cmake"
       }
     }
   ],
