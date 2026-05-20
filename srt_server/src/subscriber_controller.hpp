@@ -19,8 +19,6 @@ struct SubscriberSample {
     int queue_depth = 0;
     int queue_max = 0;
     int64_t idle_ms = -1;
-    int64_t telemetry_last_ack_age_ms = -1;
-    double telemetry_relay_to_ack_ms = -1.0;
 };
 
 struct SubscriberControlResult {
@@ -42,18 +40,14 @@ public:
 
         const bool mild_now =
             rising_queue_cycles_ >= 2 ||
-            s.idle_ms > 1500 ||
-            s.telemetry_last_ack_age_ms > 1500;
+            s.idle_ms > 1500;
 
         const bool congested_now =
             s.queue_depth >= high_q ||
-            s.idle_ms > 3000 ||
-            s.telemetry_last_ack_age_ms > 3000 ||
-            s.telemetry_relay_to_ack_ms > 3000.0;
+            s.idle_ms > 3000;
 
         const bool severe_now =
-            s.idle_ms > 5000 &&
-            s.telemetry_last_ack_age_ms > 5000;
+            s.idle_ms > 5000;
 
         mild_cycles_ = mild_now ? mild_cycles_ + 1 : 0;
         congested_cycles_ = congested_now ? congested_cycles_ + 1 : 0;

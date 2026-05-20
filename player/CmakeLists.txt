@@ -58,7 +58,6 @@ target_link_libraries(srt_player PRIVATE
     avutil
     swscale
     swresample
-    "${FFMPEG_LIB_DIR}/swresample.lib"
 )
 
 target_compile_definitions(srt_player PRIVATE

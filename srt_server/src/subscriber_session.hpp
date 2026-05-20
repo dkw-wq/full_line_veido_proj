@@ -52,20 +52,6 @@ public:
         return true;
     }
 
-    double telemetryPushToRelayMs() const { return telemetry_push_to_relay_ms_.load(); }
-    double telemetryRelayToAckMs() const { return telemetry_relay_to_ack_ms_.load(); }
-    double telemetryPushToAckMs()  const { return telemetry_push_to_ack_ms_.load(); }
-    int64_t telemetryLastAckMs()   const { return telemetry_last_ack_ms_.load(); }
-
-    void updateTelemetryLatency(double push_to_relay_ms,
-                                double relay_to_ack_ms,
-                                double push_to_ack_ms) {
-        telemetry_push_to_relay_ms_.store(push_to_relay_ms);
-        telemetry_relay_to_ack_ms_.store(relay_to_ack_ms);
-        telemetry_push_to_ack_ms_.store(push_to_ack_ms);
-        telemetry_last_ack_ms_.store(steady_ms());
-    }
-
     bool        running()        const { return running_.load(); }
     uint64_t    id()             const { return id_; }
     std::string peer()           const { return sockaddr_to_string(peer_); }
@@ -85,9 +71,6 @@ public:
         sample.queue_max = cfg_.subscriber_queue_max_chunks;
         int64_t last_active = last_active_ms_.load();
         sample.idle_ms = last_active > 0 ? now_ms - last_active : -1;
-        int64_t last_ack = telemetry_last_ack_ms_.load();
-        sample.telemetry_last_ack_age_ms = last_ack > 0 ? now_ms - last_ack : -1;
-        sample.telemetry_relay_to_ack_ms = telemetry_relay_to_ack_ms_.load();
 
         SubscriberControlResult result = controller_.update(sample, now_ms);
         if (result.changed) set_control_action(result.action);
@@ -196,10 +179,6 @@ private:
     std::atomic<uint64_t> sent_bytes_{0};
     std::atomic<int64_t>  last_active_ms_{0};
     std::atomic<int>      latency_ms_{-1};
-    std::atomic<double> telemetry_push_to_relay_ms_{-1.0};
-    std::atomic<double> telemetry_relay_to_ack_ms_{-1.0};
-    std::atomic<double> telemetry_push_to_ack_ms_{-1.0};
-    std::atomic<int64_t> telemetry_last_ack_ms_{-1};
     std::atomic<int> control_action_{(int)SubscriberAction::Normal};
     SubscriberController controller_;
 };

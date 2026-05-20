@@ -24,10 +24,6 @@ static const char* global_action_name(GlobalControlAction a) {
 struct GlobalControllerInput {
     int subscriber_count = 0;
     double bad_subscriber_ratio = 0.0;
-    double dash_push_to_relay_ms = -1.0;
-    double dash_relay_to_ack_ms = -1.0;
-    double dash_push_to_ack_ms = -1.0;
-    int64_t dash_last_ack_ms = -1;
     uint64_t queue_drops = 0;
     int64_t pub_idle_ms = -1;
 };
@@ -46,8 +42,7 @@ struct GlobalDecision {
 class GlobalController {
 public:
     explicit GlobalController(const Config& cfg)
-        : target_e2e_ms_(cfg.e2e_target_ms),
-          base_bitrate_kbps_(cfg.base_bitrate_kbps),
+        : base_bitrate_kbps_(cfg.base_bitrate_kbps),
           min_bitrate_kbps_(cfg.min_bitrate_kbps),
           base_fps_(cfg.base_fps),
           min_fps_(cfg.min_fps),
@@ -66,12 +61,7 @@ public:
         const bool pub_stalled = in.pub_idle_ms > 4000;
         const bool majority_bad = in.bad_subscriber_ratio > 0.60;
         const bool mid_bad = in.bad_subscriber_ratio >= 0.30 && in.bad_subscriber_ratio <= 0.60;
-        const bool ack_stale = in.dash_last_ack_ms > 2500;
         const bool drops_growing = queue_drop_growth_cycles_ >= 2;
-        const bool p2r_bad = in.dash_push_to_relay_ms > 500.0;
-        const bool r2a_bad = in.dash_relay_to_ack_ms > 800.0;
-        const bool p2r_normal = in.dash_push_to_relay_ms >= 0.0 && in.dash_push_to_relay_ms < 300.0;
-        const bool relay_side_bad = r2a_bad && p2r_normal;
 
         if (pub_stalled) {
             if (!placeholder_active_ || now_ms - last_placeholder_ms_ >= placeholder_cooldown_ms_) {
@@ -82,10 +72,6 @@ public:
 
         const bool normal_window =
             in.bad_subscriber_ratio < 0.10 &&
-            in.dash_push_to_ack_ms >= 0.0 &&
-            in.dash_push_to_ack_ms < std::max(400, target_e2e_ms_ - 200) &&
-            in.dash_last_ack_ms >= 0 &&
-            in.dash_last_ack_ms < 1500 &&
             in.pub_idle_ms >= 0 &&
             in.pub_idle_ms < 1500 &&
             !drops_growing;
@@ -96,24 +82,12 @@ public:
             if (d.action != GlobalControlAction::Noop) return d;
         }
 
-        const bool severe_global = majority_bad || ack_stale || drops_growing;
+        const bool severe_global = majority_bad || drops_growing;
         if (severe_global && can_degrade(now_ms)) {
             return degrade("global congestion", now_ms);
         }
 
-        if (p2r_bad && push_to_relay_bad_cycles_ >= 2 && can_degrade(now_ms)) {
-            return degrade("push to relay degraded", now_ms);
-        }
-
-        if (relay_side_bad && majority_bad && can_degrade(now_ms)) {
-            return degrade("relay to subscriber degraded", now_ms);
-        }
-
-        if (e2e_high_cycles_ >= 3 && can_degrade(now_ms)) {
-            return degrade("end to end latency high", now_ms);
-        }
-
-        if (mid_bad && push_to_ack_rising_cycles_ >= 2) {
+        if (mid_bad) {
             if (global_warning_cycles_ >= 3 && can_degrade(now_ms)) {
                 return degrade("global warning escalated", now_ms);
             }
@@ -122,7 +96,7 @@ public:
             }
         }
 
-        if ((e2e_high_cycles_ >= 6 || severe_global) &&
+        if (severe_global &&
             degrade_actions_since_recovery_ >= 3 &&
             can_enter_placeholder(now_ms)) {
             return enter_placeholder("degrade ineffective", now_ms);
@@ -145,20 +119,6 @@ public:
 
 private:
     void update_counters(const GlobalControllerInput& in) {
-        const bool e2e_high =
-            in.dash_push_to_ack_ms > (double)target_e2e_ms_;
-        e2e_high_cycles_ = e2e_high ? e2e_high_cycles_ + 1 : 0;
-
-        const bool p2r_bad = in.dash_push_to_relay_ms > 500.0;
-        push_to_relay_bad_cycles_ = p2r_bad ? push_to_relay_bad_cycles_ + 1 : 0;
-
-        bool rising = false;
-        if (prev_push_to_ack_ms_ >= 0.0 && in.dash_push_to_ack_ms >= 0.0) {
-            rising = in.dash_push_to_ack_ms > prev_push_to_ack_ms_ + 100.0;
-        }
-        push_to_ack_rising_cycles_ = rising ? push_to_ack_rising_cycles_ + 1 : 0;
-        prev_push_to_ack_ms_ = in.dash_push_to_ack_ms;
-
         if (prev_queue_drops_ != invalid_drops_ && in.queue_drops > prev_queue_drops_) {
             queue_drop_growth_cycles_ += 1;
         } else {
@@ -283,7 +243,6 @@ private:
         return d;
     }
 
-    int target_e2e_ms_;
     int base_bitrate_kbps_;
     int min_bitrate_kbps_;
     int base_fps_;
@@ -298,16 +257,12 @@ private:
     int width_;
     int height_;
 
-    int e2e_high_cycles_ = 0;
-    int push_to_relay_bad_cycles_ = 0;
-    int push_to_ack_rising_cycles_ = 0;
     int queue_drop_growth_cycles_ = 0;
     int recovery_cycles_ = 0;
     int global_warning_cycles_ = 0;
     int degrade_actions_since_recovery_ = 0;
     bool placeholder_active_ = false;
 
-    double prev_push_to_ack_ms_ = -1.0;
     static constexpr uint64_t invalid_drops_ = std::numeric_limits<uint64_t>::max();
     uint64_t prev_queue_drops_ = invalid_drops_;
 

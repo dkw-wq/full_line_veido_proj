@@ -71,7 +71,7 @@ gchar *build_pipeline_description(const AppConfig *cfg, const gchar *resolved_au
 
     g_string_append_printf(
         pipeline_desc,
-        "mpegtsmux name=mux alignment=7 ! queue ! identity name=tlmyinject silent=true ! "
+        "mpegtsmux name=mux alignment=7 ! queue ! "
         "srtclientsink uri=\"srt://%s:%d?mode=caller&latency=%d\" ",
         cfg->host,
         cfg->port,

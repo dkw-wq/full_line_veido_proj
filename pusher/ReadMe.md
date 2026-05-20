@@ -15,7 +15,6 @@ gcc \
   pusher/audio_device.c \
   pusher/control_server.c \
   pusher/gst_runtime.c \
-  pusher/telemetry_injector.c \
   -o pusher/srt_cam_push \
   $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-video-1.0 glib-2.0) \
   -lasound -lpthread
@@ -33,7 +32,6 @@ Pusher 负责：
 - 编码视频（x264）与音频（AAC/Opus）
 - 封装为 MPEG-TS
 - 通过 SRT 推送到 relay
-- 向 TS 中注入 telemetry private packet
 - 提供 TCP 控制端口，响应 relay / player 的控制命令
 
 这是整个系统的**唯一源头**，因此任何码率、帧率、分辨率、黑屏/静音切换，最终都需要在这里落实。
@@ -70,7 +68,6 @@ Pusher 负责：
 - `x264enc (venc)`
 - `h264parse (vparse)`
 - `mpegtsmux`
-- `identity (tlmyinject)`
 - `srtclientsink`
 
 ### 视频占位链
@@ -95,21 +92,7 @@ Pusher 负责：
 
 ---
 
-## 4. Telemetry 注入
-
-Pusher 不仅推真实媒体，还会在 TS 中定期插入 telemetry private packet。
-
-作用：
-
-- 为 relay 提供可追踪的 `seq + t_push_us`
-- 为 observer 解析与 ACK 回传提供基础
-- 支持 relay 计算 Push→Relay / Push→ACK 等时延
-
-如果没有这一层，relay 无法获得真正的端到端时延观测。
-
----
-
-## 5. 控制面
+## 4. 控制面
 
 Pusher 内部运行一个 TCP 控制服务，默认监听 `10090`。
 
@@ -180,7 +163,7 @@ AUDIO_MODE NORMAL
 
 ---
 
-## 6. 控制设计原则
+## 5. 控制设计原则
 
 ### 先便宜，后激进
 

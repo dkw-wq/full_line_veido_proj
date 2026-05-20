@@ -36,7 +36,6 @@
 
 #include <fcntl.h>
 
-#include "telemetry.h"
 #include "ws_util.hpp"
 
 namespace {
@@ -48,7 +47,6 @@ namespace {
 #include "global_controller.hpp"
 #include "pusher_control_client.hpp"
 #include "subscriber_session.hpp"
-#include "telemetry_relay.hpp"
 #include "relay_server.hpp"
 #include "cli.hpp"
 

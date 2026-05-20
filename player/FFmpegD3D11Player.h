@@ -20,6 +20,8 @@ extern "C" {
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
+#include <iostream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -185,6 +187,9 @@ private:
 
     void setPlaybackStatus(PlayerState state, PlayerErrorCode error, const QString& message,
                            bool audio_available_override = false, bool set_audio = false) {
+        const auto line = std::string("[player] ") + message.toLocal8Bit().constData() + "\n";
+        std::cerr << line;
+        std::ofstream("player_status.log", std::ios::app) << line;
         mutateStatus([&](PlayerStatus& s) {
             s.state           = state;
             s.error           = error;

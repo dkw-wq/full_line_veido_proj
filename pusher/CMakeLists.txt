@@ -14,7 +14,6 @@ add_executable(srt_cam_push
     audio_device.c
     control_server.c
     gst_runtime.c
-    telemetry_injector.c
 )
 
 target_include_directories(srt_cam_push PRIVATE

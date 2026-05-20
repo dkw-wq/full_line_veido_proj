@@ -3,3 +3,4 @@ player/.vs/
 .vscode/
 .idea/
 build/
+player_status.log

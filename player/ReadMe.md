@@ -2,22 +2,40 @@
 ```
 Windows上编译运行顺序:
 
-1.
-(1)
+0. 确认 vcpkg 的 FFmpeg 带 SRT 协议支持
+
+如果运行时报 `Protocol not found`，说明当前链接的 FFmpeg 不认识 `srt://`，需要安装 SRT 特性：
+
+```powershell
+E:\vcpkg\vcpkg.exe install "ffmpeg[srt]:x64-windows" --recurse
+E:\vcpkg\vcpkg.exe install "qtmultimedia[ffmpeg,widgets]:x64-windows"
+```
+
+1. 配置 CMake（只需要在首次编译或依赖路径变化时执行）
+
 PS C:\Users\dkw\.a_dkwrtc\full_line_veido_proj> cmake -S player -B player/build `
    -G "Visual Studio 17 2022" -A x64 `
    -DCMAKE_TOOLCHAIN_FILE=E:/vcpkg/scripts/buildsystems/vcpkg.cmake `
    -DVCPKG_TARGET_TRIPLET=x64-windows
 
-(2)
-& "E:\vcpkg\installed\x64-windows\tools\Qt6\bin\windeployqt.exe" --release player\build\Release\srt_player.exe
+2. 编译
 
-//"(2)"运行一次即可，注意编译时把vcpkg等路径换成自己电脑里的文件路径
-
-2.
 cmake --build player/build --config Release
 
-3.
+3. 部署 Qt 运行依赖（exe 生成后再执行，首次部署或 Qt/vcpkg 更新后执行）
+
+& "E:\vcpkg\installed\x64-windows\tools\Qt6\bin\windeployqt.exe" --release player\build\Release\srt_player.exe
+
+注意：先执行第 2 步生成 `player\build\Release\srt_player.exe`，再执行 `windeployqt`。否则会因为找不到 exe 报错。编译时把 vcpkg 等路径换成自己电脑里的文件路径。
+
+Player 会把播放状态写到当前工作目录的 `player_status.log`。连接失败时优先看这里：
+
+- `Protocol not found`：vcpkg 的 FFmpeg 没有安装 `ffmpeg[srt]`
+- `I/O error`：已经识别 SRT，但 relay / pusher / 网络当前没有完成 SRT 收流
+- `播放中（含音频）`：SRT、探测、解码都已经成功
+
+4. 运行
+
 .\player\build\Release\srt_player.exe "srt://10.158.134.17:9001?mode=caller&latency=20&streamid=cam1" 
 
 ```

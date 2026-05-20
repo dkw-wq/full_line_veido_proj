@@ -1,12 +1,10 @@
 // pusher/srt_cam_push.c
-// 应用入口。GStreamer 管线、音频枚举、控制服务器和遥测注入已拆分到独立模块。
+// 应用入口。GStreamer 管线、音频枚举、控制服务器已拆分到独立模块。
 
 #include "app_config.h"
 #include "audio_device.h"
 #include "control_server.h"
 #include "gst_runtime.h"
-#include "telemetry_injector.h"
-#include "telemetry.h"
 
 #include <gst/gst.h>
 #include <glib.h>
@@ -56,14 +54,6 @@ int main(int argc, char *argv[]) {
     loop = g_main_loop_new(NULL, FALSE);
     bus = gst_element_get_bus(pipeline);
     gst_bus_add_watch(bus, bus_call, loop);
-
-    TelemetryInjectCtx tlmy_inject;
-    memset(&tlmy_inject, 0, sizeof(tlmy_inject));
-    tlmy_inject.next_inject_at = TLMY_TS_INTERVAL;
-
-    if (!install_tlmy_injector(pipeline, &tlmy_inject)) {
-        g_printerr("[TLMY] injector install failed\n");
-    }
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {

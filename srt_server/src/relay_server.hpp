@@ -24,28 +24,6 @@ public:
         t_sub_acc_ = std::thread([this]{ accept_subscriber_loop(); });
         t_monitor_ = std::thread([this]{ monitor_loop(); });
 
-        tlmy_relay_.start(cfg_.bind_ip,
-            [this](const std::string& peer_ip,
-                   double push_to_relay_ms,
-                   double relay_to_ack_ms,
-                   double push_to_ack_ms) {
-                dash_push_to_relay_ms_.store(push_to_relay_ms);
-                dash_relay_to_ack_ms_.store(relay_to_ack_ms);
-                dash_push_to_ack_ms_.store(push_to_ack_ms);
-                dash_last_ack_ms_.store(steady_ms());
-
-                std::lock_guard<std::mutex> lk(sub_mu_);
-                for (auto& [id, sess] : subscribers_) {
-                    std::string peer = sess->peer();
-                    auto colon = peer.rfind(':');
-                    std::string ip = (colon == std::string::npos) ? peer : peer.substr(0, colon);
-                    if (ip == peer_ip) {
-                        sess->updateTelemetryLatency(push_to_relay_ms, relay_to_ack_ms, push_to_ack_ms);
-                    }
-                }
-            }
-        );
-
         log_line("INFO", "relay started  pub=" + std::to_string(cfg_.publisher_port) +
                  "  sub=" + std::to_string(cfg_.subscriber_port) +
                  "  ws=" + std::to_string(cfg_.ws_port));
@@ -53,7 +31,7 @@ public:
     }
 
     void stop() {
-        tlmy_relay_.stop();
+        
 
         bool exp = true;
         if (!stopped_.compare_exchange_strong(exp, false)) return;
@@ -159,7 +137,6 @@ private:
             status_.total_ingress_bytes.fetch_add((uint64_t)n);
             status_.ingress_bytes_window.fetch_add((uint64_t)n);
             status_.ingress_chunks.fetch_add(1);
-            tlmy_relay_.observe_chunk((const uint8_t*)buf.data(), (size_t)n);
             if (cfg_.validate_ts) {
                 if (!validator_.inspect((const uint8_t*)buf.data(), (size_t)n, status_)) {
                     log_line("WARN","TS: "+validator_.last_error()); continue;
@@ -319,11 +296,6 @@ private:
             if ((int)ingress_hist.size() > HIST) ingress_hist.pop_front();
             if ((int)egress_hist.size()  > HIST) egress_hist.pop_front();
 
-            double dash_push_to_relay_ms = dash_push_to_relay_ms_.load();
-            double dash_relay_to_ack_ms  = dash_relay_to_ack_ms_.load();
-            double dash_push_to_ack_ms   = dash_push_to_ack_ms_.load();
-            const int64_t dash_last_ack_age_ms =
-                dash_last_ack_ms_.load() > 0 ? now_ms - dash_last_ack_ms_.load() : -1;
             const int64_t pub_idle_ms =
                 status_.publisher_last_active_at_ms.load() > 0
                     ? now_ms - status_.publisher_last_active_at_ms.load()
@@ -366,10 +338,6 @@ private:
             GlobalControllerInput global_in;
             global_in.subscriber_count = subscriber_total;
             global_in.bad_subscriber_ratio = bad_subscriber_ratio;
-            global_in.dash_push_to_relay_ms = dash_push_to_relay_ms;
-            global_in.dash_relay_to_ack_ms = dash_relay_to_ack_ms;
-            global_in.dash_push_to_ack_ms = dash_push_to_ack_ms;
-            global_in.dash_last_ack_ms = dash_last_ack_age_ms;
             global_in.queue_drops = queue_drops;
             global_in.pub_idle_ms = pub_idle_ms;
             GlobalDecision global_decision = global_controller_.update(global_in, now_ms);
@@ -377,9 +345,6 @@ private:
 
             std::ostringstream log_oss;
             log_oss << std::fixed << std::setprecision(2)
-                    << "push->relay=" << dash_push_to_relay_ms << "ms"
-                    << " push->ack="  << dash_push_to_ack_ms << "ms"
-                    << " relay->ack=" << dash_relay_to_ack_ms << "ms"
                     << " pub=" << (status_.publisher_online.load() ? 1 : 0)
                     << " in=" << in_mbps << "Mbps"
                     << " out=" << out_mbps << "Mbps"
@@ -406,10 +371,6 @@ private:
                   << "\"queue_drops\":" << queue_drops << ","
                   << "\"pub_idle_ms\":" << pub_idle_ms << ","
                   << "\"ws_clients\":" << ws_.client_count() << ","
-                  << "\"dash_push_to_relay_ms\":" << dash_push_to_relay_ms << ","
-                  << "\"dash_relay_to_ack_ms\":" << dash_relay_to_ack_ms << ","
-                  << "\"dash_push_to_ack_ms\":" << dash_push_to_ack_ms << ","
-                  << "\"dash_last_ack_ms\":" << dash_last_ack_age_ms << ","
                   << "\"bad_subscriber_ratio\":" << bad_subscriber_ratio << ","
                   << "\"global_state\":\"" << global_controller_.state_name() << "\","
                   << "\"global_action\":\"" << global_action_name(global_decision.action) << "\","
@@ -440,10 +401,6 @@ private:
                           << "\"sent_mb\":" << (sess->sent_bytes() / 1048576.0) << ","
                           << "\"q\":" << sess->queue_depth() << ","
                           << "\"latency_ms\":" << sess->latency_ms() << ","
-                          << "\"telemetry_push_to_relay_ms\":" << sess->telemetryPushToRelayMs() << ","
-                          << "\"telemetry_relay_to_ack_ms\":" << sess->telemetryRelayToAckMs() << ","
-                          << "\"telemetry_push_to_ack_ms\":" << sess->telemetryPushToAckMs() << ","
-                          << "\"telemetry_last_ack_ms\":" << (sess->telemetryLastAckMs() > 0 ? now_ms - sess->telemetryLastAckMs() : -1) << ","
                           << "\"idle_ms\":" << (now_ms - sess->last_active_ms()) << ","
                           << "\"ctrl\":\"" << sess->control_action_name() << "\""
                           << "}";
@@ -462,13 +419,8 @@ private:
     GlobalController global_controller_;
     PusherControlClient pusher_control_;
     WsBroadcaster ws_;
-    TelemetryRelay tlmy_relay_;
 
     std::atomic<bool> stopped_{true};
-    std::atomic<double> dash_push_to_relay_ms_{-1.0};
-    std::atomic<double> dash_relay_to_ack_ms_{-1.0};
-    std::atomic<double> dash_push_to_ack_ms_{-1.0};
-    std::atomic<int64_t> dash_last_ack_ms_{-1};
 
     SRTSOCKET pub_listener_ = SRT_INVALID_SOCK;
     SRTSOCKET sub_listener_ = SRT_INVALID_SOCK;
