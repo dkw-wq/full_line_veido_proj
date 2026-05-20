@@ -4,3 +4,5 @@ player/.vs/
 .idea/
 build/
 player_status.log
+srt_server/build
+pusher/build
