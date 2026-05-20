@@ -1,0 +1,3 @@
+/home/dkw/dir1/vedio_proj/srt_server/build/CMakeFiles/srt_relay_server.dir
+/home/dkw/dir1/vedio_proj/srt_server/build/CMakeFiles/edit_cache.dir
+/home/dkw/dir1/vedio_proj/srt_server/build/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/srt_relay_server.dir/src/main.cpp.o -o srt_relay_server  -lsrt -lpthread

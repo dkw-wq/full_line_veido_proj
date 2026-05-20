@@ -1,0 +1,3 @@
+/home/dkw/dir1/vedio_proj/pusher/build/CMakeFiles/srt_cam_push.dir
+/home/dkw/dir1/vedio_proj/pusher/build/CMakeFiles/edit_cache.dir
+/home/dkw/dir1/vedio_proj/pusher/build/CMakeFiles/rebuild_cache.dir

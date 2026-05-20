@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake -S srt_server -B srt_server/build)",
+      "Bash(cmake --build srt_server/build -j4)",
+      "Bash(g++ -std=c++17 -O2 -o observer observer.cpp -lsrt -lpthread)",
+      "Bash(cmake -S . -B build)",
+      "Bash(cmake --build build -j4)"
+    ]
+  }
+}
