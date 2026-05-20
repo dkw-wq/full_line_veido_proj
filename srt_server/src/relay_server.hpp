@@ -70,6 +70,11 @@ private:
         sf(SRTO_SNDBUF, &sb, sizeof(sb), "SNDBUF");
         sf(SRTO_RCVTIMEO, &rto, sizeof(rto), "RCVTIMEO");
 
+        {
+            int sto = for_pub ? 5000 : 3000;
+            sf(SRTO_SNDTIMEO, &sto, sizeof(sto), "SNDTIMEO");
+        }
+
         if (cfg_.passphrase && !cfg_.passphrase->empty()) {
             int pk = cfg_.pbkeylen;
             sf(SRTO_PASSPHRASE,cfg_.passphrase->c_str(),(int)cfg_.passphrase->size(),"PASSPHRASE");
@@ -169,16 +174,27 @@ private:
     }
 
     void broadcast(const uint8_t* data, size_t len) {
-        std::vector<uint64_t> dead;
+        std::vector<std::shared_ptr<SubscriberSession>> snapshot;
         {
             std::lock_guard<std::mutex> lk(sub_mu_);
-            for (auto& [id,s] : subscribers_) {
-                if (!s->running()) { dead.push_back(id); continue; }
-                if (!s->push_chunk(data,len)) dead.push_back(id);
-            }
-            for (uint64_t id : dead) {
-                auto it = subscribers_.find(id);
-                if (it != subscribers_.end()) { it->second->stop(); subscribers_.erase(it); }
+            snapshot.reserve(subscribers_.size());
+            for (auto& [_, s] : subscribers_)
+                snapshot.push_back(s);
+        }
+
+        std::vector<uint64_t> dead;
+        for (auto& s : snapshot) {
+            if (!s->running()) { dead.push_back(s->id()); continue; }
+            if (!s->push_chunk(data, len)) dead.push_back(s->id());
+        }
+
+        if (dead.empty()) return;
+        std::lock_guard<std::mutex> lk(sub_mu_);
+        for (uint64_t id : dead) {
+            auto it = subscribers_.find(id);
+            if (it != subscribers_.end() && !it->second->running()) {
+                it->second->stop();
+                subscribers_.erase(it);
             }
         }
     }
