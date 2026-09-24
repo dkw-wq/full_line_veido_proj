@@ -3,4 +3,5 @@ player/.vs/
 .vscode/
 .idea/
 build/
+build-asan/
 player_status.log
