@@ -1,69 +1,109 @@
+struct StreamChunk {
+    std::vector<uint8_t> data;
+    StreamChunk(const uint8_t* bytes, size_t len) : data(bytes, bytes + len) {}
+    explicit StreamChunk(std::vector<uint8_t> bytes) : data(std::move(bytes)) {}
+};
+
 class SubscriberSession {
 public:
+    enum class SendResult { Empty, Sent, Blocked, Failed };
+
     SubscriberSession(SRTSOCKET sock, sockaddr_in peer,
                       StreamStatus& status, const Config& cfg, uint64_t id)
-        : sock_(sock), peer_(peer), status_(status), cfg_(cfg), id_(id) {}
+        : sock_(sock), peer_(peer), status_(status), cfg_(cfg), id_(id) {
+        status_.subscriber_count.fetch_add(1);
+        last_active_ms_.store(steady_ms());
+        latency_ms_.store(read_latency(sock_));
+        log_line("INFO", "subscriber connected: " + sockaddr_to_string(peer_));
+        dump_srt_latency("[SUB]", sock_);
+        log_line("INFO", "sub#" + std::to_string(id_) + " started: " + this->peer());
+    }
     ~SubscriberSession() { stop(); }
 
-    void start() { worker_ = std::thread([this]{ run(); }); }
-
     void stop() {
-        bool first = false;
-        if (!stopped_.compare_exchange_strong(first, true)) return;
+        if (stopped_.exchange(true)) return;
         running_.store(false);
-        { std::lock_guard<std::mutex> lk(mu_); closed_ = true; }
-        cv_.notify_all();
+        { std::lock_guard<std::mutex> lk(mu_); queue_.clear(); }
         srt_close(sock_);
-        if (worker_.joinable()) worker_.join();
+        status_.subscriber_count.fetch_sub(1);
+        log_line("INFO", "sub#" + std::to_string(id_) + " stopped");
     }
 
-    bool push_chunk(const uint8_t* data, size_t len) {
+    void request_close() { closing_.store(true); }
+    bool closing() const { return closing_.load(); }
+    SRTSOCKET socket() const { return sock_; }
+
+    bool push_chunk(const std::shared_ptr<const StreamChunk>& chunk, bool rap) {
         std::lock_guard<std::mutex> lk(mu_);
-        if (closed_) return false;
+        if (closing_.load() || !running_.load()) return false;
         if (!synced_) {
-            if (!has_rap(data, len)) return true;
+            if (!rap) return true;
             synced_ = true;
         }
-
         SubscriberAction action = control_action();
         if (action == SubscriberAction::Placeholder) {
             if (!queue_.empty()) {
                 status_.subscriber_queue_drops.fetch_add((uint64_t)queue_.size(), std::memory_order_relaxed);
                 queue_.clear();
             }
-            std::vector<uint8_t> placeholder = make_null_ts_chunk(len);
-            queue_.emplace_back(placeholder.data(), placeholder.data() + placeholder.size(), steady_ms());
-            cv_.notify_one();
+            queue_.push_back(std::make_shared<StreamChunk>(make_null_ts_chunk(chunk->data.size())));
             status_.subscriber_queue_drops.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
-
         if (action == SubscriberAction::Drop && !queue_.empty()) {
             status_.subscriber_queue_drops.fetch_add((uint64_t)queue_.size(), std::memory_order_relaxed);
             queue_.clear();
         }
-
         if (queue_.size() >= (size_t)cfg_.subscriber_queue_max_chunks) {
             queue_.pop_front();
             status_.subscriber_queue_drops.fetch_add(1, std::memory_order_relaxed);
         }
-        queue_.emplace_back(data, data + len, steady_ms());
-        cv_.notify_one();
+        queue_.push_back(chunk);
         return true;
     }
 
-    bool        running()        const { return running_.load(); }
-    uint64_t    id()             const { return id_; }
-    std::string peer()           const { return sockaddr_to_string(peer_); }
-    uint64_t    sent_bytes()     const { return sent_bytes_.load(); }
-    int64_t     last_active_ms() const { return last_active_ms_.load(); }
-    int         queue_depth()    const { std::lock_guard<std::mutex> lk(mu_); return (int)queue_.size(); }
-    int         latency_ms()     const { return latency_ms_.load(); }
+    SendResult send_one() {
+        std::shared_ptr<const StreamChunk> chunk;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (queue_.empty() || closing_.load()) return SendResult::Empty;
+            chunk = queue_.front();
+        }
+        const int n = srt_send(sock_, (const char*)chunk->data.data(), (int)chunk->data.size());
+        if (n == SRT_ERROR) {
+            if (srt_getlasterror(nullptr) == SRT_EASYNCSND) return SendResult::Blocked;
+            log_line("WARN", "sub#" + std::to_string(id_) + " send: " + last_srt_error());
+            request_close();
+            return SendResult::Failed;
+        }
+        if ((size_t)n != chunk->data.size()) {
+            log_line("WARN", "sub#" + std::to_string(id_) + " short send");
+            request_close();
+            return SendResult::Failed;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!queue_.empty() && queue_.front() == chunk) queue_.pop_front();
+        }
+        sent_bytes_.fetch_add((uint64_t)n);
+        status_.total_egress_bytes.fetch_add((uint64_t)n);
+        status_.egress_bytes_window.fetch_add((uint64_t)n);
+        last_active_ms_.store(steady_ms());
+        return SendResult::Sent;
+    }
+
+    bool running() const { return running_.load() && !closing_.load(); }
+    uint64_t id() const { return id_; }
+    std::string peer() const { return sockaddr_to_string(peer_); }
+    uint64_t sent_bytes() const { return sent_bytes_.load(); }
+    int64_t last_active_ms() const { return last_active_ms_.load(); }
+    int queue_depth() const { std::lock_guard<std::mutex> lk(mu_); return (int)queue_.size(); }
+    int latency_ms() const { return latency_ms_.load(); }
     SubscriberAction control_action() const {
         return (SubscriberAction)control_action_.load(std::memory_order_relaxed);
     }
     const char* control_action_name() const { return subscriber_action_name(control_action()); }
-    bool        bad_for_global() const { return control_action() != SubscriberAction::Normal; }
+    bool bad_for_global() const { return control_action() != SubscriberAction::Normal; }
 
     SubscriberControlResult evaluate_control(int64_t now_ms) {
         SubscriberSample sample;
@@ -71,18 +111,10 @@ public:
         sample.queue_max = cfg_.subscriber_queue_max_chunks;
         int64_t last_active = last_active_ms_.load();
         sample.idle_ms = last_active > 0 ? now_ms - last_active : -1;
-
         SubscriberControlResult result = controller_.update(sample, now_ms);
         if (result.changed) set_control_action(result.action);
         return result;
     }
-
-private:
-    struct Chunk {
-        std::vector<uint8_t> data;
-        int64_t ts;
-        Chunk(const uint8_t* b, const uint8_t* e, int64_t t) : data(b,e), ts(t) {}
-    };
 
     static bool has_rap(const uint8_t* d, size_t l) {
         if (!d || l < 188 || l % 188) return false;
@@ -97,6 +129,7 @@ private:
         return false;
     }
 
+private:
     std::vector<uint8_t> make_null_ts_chunk(size_t desired_len) {
         size_t len = desired_len >= 188 ? desired_len - (desired_len % 188) : 188;
         if (len == 0) len = 188;
@@ -110,38 +143,6 @@ private:
         }
         return out;
     }
-
-    void run() {
-        status_.subscriber_count.fetch_add(1);
-        last_active_ms_.store(steady_ms());
-        latency_ms_.store(read_latency(sock_));
-        
-        log_line("INFO", "subscriber connected: " + sockaddr_to_string(peer_));
-        dump_srt_latency("[SUB]", sock_);
-        log_line("INFO", "sub#" + std::to_string(id_) + " started: " + peer());
-
-        while (running_.load() && g_running.load()) {
-            Chunk chunk(nullptr, nullptr, 0);
-            {
-                std::unique_lock<std::mutex> lk(mu_);
-                cv_.wait_for(lk, 500ms, [&]{ return !queue_.empty()||closed_||!running_.load()||!g_running.load(); });
-                if (!running_.load() || closed_ || !g_running.load()) break;
-                if (queue_.empty()) continue;
-                chunk = std::move(queue_.front());
-                queue_.pop_front();
-            }
-            int n = srt_send(sock_, (const char*)chunk.data.data(), (int)chunk.data.size());
-            if (n == SRT_ERROR) { log_line("WARN","sub#"+std::to_string(id_)+" send: "+last_srt_error()); break; }
-            sent_bytes_.fetch_add((uint64_t)n);
-            status_.total_egress_bytes.fetch_add((uint64_t)n);
-            status_.egress_bytes_window.fetch_add((uint64_t)n);
-            last_active_ms_.store(steady_ms());
-        }
-        status_.subscriber_count.fetch_sub(1);
-        running_.store(false);
-        log_line("INFO", "sub#" + std::to_string(id_) + " stopped");
-    }
-
     static int read_latency(SRTSOCKET s) {
         int v = 0, l = sizeof(v);
         if (srt_getsockflag(s, SRTO_RCVLATENCY, &v, &l) == 0) return v;
@@ -149,7 +150,6 @@ private:
         if (srt_getsockflag(s, SRTO_LATENCY, &v, &l) == 0) return v;
         return -1;
     }
-
     void set_control_action(SubscriberAction action) {
         SubscriberAction old = (SubscriberAction)control_action_.exchange((int)action, std::memory_order_relaxed);
         if (old == action) return;
@@ -167,18 +167,14 @@ private:
     StreamStatus& status_;
     const Config& cfg_;
     uint64_t id_;
-
     mutable std::mutex mu_;
-    std::condition_variable cv_;
-    std::deque<Chunk> queue_;
-    bool closed_ = false, synced_ = false;
+    std::deque<std::shared_ptr<const StreamChunk>> queue_;
+    bool synced_ = false;
     uint8_t placeholder_cc_ = 0;
-
-    std::atomic<bool> running_{true}, stopped_{false};
-    std::thread worker_;
+    std::atomic<bool> running_{true}, stopped_{false}, closing_{false};
     std::atomic<uint64_t> sent_bytes_{0};
-    std::atomic<int64_t>  last_active_ms_{0};
-    std::atomic<int>      latency_ms_{-1};
+    std::atomic<int64_t> last_active_ms_{0};
+    std::atomic<int> latency_ms_{-1};
     std::atomic<int> control_action_{(int)SubscriberAction::Normal};
     SubscriberController controller_;
 };

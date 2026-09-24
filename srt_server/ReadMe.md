@@ -62,6 +62,7 @@ Relay 主要包含以下线程：
 - publisher accept loop
 - publisher read loop
 - subscriber accept loop
+- subscriber SRT epoll send loop
 - monitor loop
 - telemetry ACK loop
 - WebSocket accept / handshake / broadcast
@@ -69,6 +70,7 @@ Relay 主要包含以下线程：
 其中：
 
 - `publisher_read_loop()` 负责接收原始 TS chunk
+- `subscriber_send_loop()` 用一个线程管理所有 subscriber 的非阻塞发送
 - `monitor_loop()` 负责计算统计、执行控制器、向 dashboard 推送 JSON
 
 ---
@@ -78,11 +80,15 @@ Relay 主要包含以下线程：
 每个 subscriber 都有独立的 `SubscriberSession`：
 
 - 独立队列
-- 独立发送线程
+- 共用一个 SRT epoll 发送线程
 - 独立 `telemetry_*` 数据
 - 独立控制状态：`NORMAL / WARN / DROP / PLACEHOLDER`
 
-这意味着 relay 的一对多不是“单队列广播”，而是**每个 subscriber 各自消费自己的发送队列**。
+每个 TS chunk 在 relay 中只复制一次。各 subscriber 队列只保存指向该 chunk 的共享引用；
+最后一个引用释放后回收数据。占位 TS 包因每个客户端的连续计数器不同而单独生成。
+只有队列有数据时才监听该客户端的 SRT 可写事件，队列为空时取消可写监听。
+这是 libsrt 的 SRT epoll，普通 Linux epoll 不能直接监听 SRT socket。
+每条 SRT 连接仍有独立的协议发送缓冲区、重传状态和网络发送开销。
 
 优点：
 
