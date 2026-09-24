@@ -1,0 +1,63 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\build-asan\srt_player_autogen\mocs_compilation_Debug.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\D3D11Renderer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\ControlClient.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\Recorder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\build-asan\srt_player_autogen\mocs_compilation_Release.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\build-asan\srt_player_autogen\mocs_compilation_MinSizeRel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\build-asan\srt_player_autogen\mocs_compilation_RelWithDebInfo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\PlayerStatus.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\PlayerUi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\FFmpegUtil.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\AudioPipeline.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\VideoPipeline.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\FFmpegD3D11Player.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\SrtUrl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\dkw\.a_dkwrtc\full_line_veido_proj\player\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{DECF5BA5-DF41-3338-B3AC-EA5A931B2A84}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{BEB28A66-EA5E-3881-93E4-8F28C505BD5D}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

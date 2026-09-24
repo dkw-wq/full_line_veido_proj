@@ -140,7 +140,9 @@ gcc srt_cam_push.c -o srt_cam_push \
 
 ```bash
 
-.\player\build\Release\srt_player.exe "srt://10.160.196.17:9001?mode=caller&latency=20&streamid=cam1" 
+.\player\build\Release\srt_player.exe "srt://jfznbx.cn:9001?mode=caller&latency=20&streamid=cam1"
+
+不传参数时，player 也默认从上述地址拉流。
 
 编译:
 cmake -S player -B player/build `

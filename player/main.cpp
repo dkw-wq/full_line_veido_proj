@@ -25,12 +25,9 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     qRegisterMetaType<PlayerStatus>("PlayerStatus");
 
-    if (argc < 2) {
-        std::cout << "用法: player.exe <srt_url>\n";
-        return 0;
-    }
-
-    const std::string url            = argv[1];
+    constexpr const char* kDefaultSrtUrl =
+        "srt://jfznbx.cn:9001?mode=caller&latency=20&streamid=cam1";
+    const std::string url            = argc >= 2 ? argv[1] : kDefaultSrtUrl;
     const std::string push_ctrl_host = extract_host_from_srt_url(url);
 
     QWidget surface;

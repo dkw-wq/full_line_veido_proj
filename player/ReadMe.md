@@ -36,7 +36,9 @@ Player 会把播放状态写到当前工作目录的 `player_status.log`。连�
 
 4. 运行
 
-.\player\build\Release\srt_player.exe "srt://10.158.134.17:9001?mode=caller&latency=20&streamid=cam1" 
+.\player\build\Release\srt_player.exe "srt://jfznbx.cn:9001?mode=caller&latency=20&streamid=cam1"
+
+也可以直接运行 `srt_player.exe`，默认使用上面的公网拉流地址。
 
 ```
 

@@ -18,7 +18,6 @@ add_executable(srt_relay_server
     src/global_controller.hpp
     src/pusher_control_client.hpp
     src/subscriber_session.hpp
-    src/telemetry_relay.hpp
     src/relay_server.hpp
     src/cli.hpp
 )

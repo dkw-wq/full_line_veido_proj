@@ -21,21 +21,31 @@ bool ControlClient::resume() {
 bool ControlClient::sendCommand(const char* cmd) {
     if (!ensureWinsock()) return false;
 
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* addresses = nullptr;
+    const std::string service = std::to_string(port_);
+    if (getaddrinfo(host_.c_str(), service.c_str(), &hints, &addresses) != 0) {
+        return false;
+    }
+
+    SOCKET sock = INVALID_SOCKET;
+    for (addrinfo* address = addresses; address != nullptr; address = address->ai_next) {
+        SOCKET candidate = socket(address->ai_family, address->ai_socktype,
+                                  address->ai_protocol);
+        if (candidate == INVALID_SOCKET) continue;
+        if (connect(candidate, address->ai_addr,
+                    static_cast<int>(address->ai_addrlen)) != SOCKET_ERROR) {
+            sock = candidate;
+            break;
+        }
+        closesocket(candidate);
+    }
+    freeaddrinfo(addresses);
     if (sock == INVALID_SOCKET) return false;
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port_);
-    if (inet_pton(AF_INET, host_.c_str(), &addr.sin_addr) != 1) {
-        closesocket(sock);
-        return false;
-    }
-
-    if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-        closesocket(sock);
-        return false;
-    }
 
     std::string msg = std::string(cmd) + "\n";
     int sent = send(sock, msg.c_str(), static_cast<int>(msg.size()), 0);

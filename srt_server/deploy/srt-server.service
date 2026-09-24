@@ -1,0 +1,15 @@
+[Unit]
+Description=SRT relay server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/srt_server
+ExecStart=/opt/srt_server/build/srt_relay_server --bind 0.0.0.0 --pub-port 9000 --sub-port 9001 --ws-port 8765
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
