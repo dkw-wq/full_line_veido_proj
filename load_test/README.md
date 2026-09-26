@@ -47,6 +47,8 @@ CSV 每行是一次采样，通常间隔约 1 秒；计算码率时使用实际�
 | `event_batch_interval_max_ms` | 本次约 1 秒采样间隔内，一批 epoll 事件处理时间的最大值。 |
 | `max_rcvbuf_packets` | 本次采样中在线客户端的 SRT 接收缓冲占用包数最大值；不是主机 UDP 接收队列。 |
 | `min_avail_rcvbuf_bytes` | 本次采样中在线客户端的 SRT 接收缓冲剩余字节数最小值；接近 0 表示接收缓冲可能被占满。 |
+| `handle_event_interval_max_ms` | 本次采样间隔内，单路 `handle_event()` 调用的最大耗时。 |
+| `recv_call_interval_max_ms` | 本次采样间隔内，单次 `srt_recv()` 调用的最大耗时。 |
 
 `--trace` 另存每路事件 CSV：`wall_time` 是本地时间，`elapsed_ms` 是测试启动后的毫秒数，`client` 是客户端序号，`event` 为 `connecting/connected/failed/finished`，`local_port` 是本机 UDP 端口，`srt_socket`/`srt_state` 是当时的 SRT 句柄和状态，`connect_ms` 是该路开始连接后的耗时，`launch_lag_ms` 是该路启动调度延迟，`loop_gap_max_ms` 是当时主循环最大间隔，`stream_id` 可在服务器 `sub#... started` 日志中检索，`detail` 是失败原因。无法取得本地端口时记为 `-1`；所有失败行也写到标准错误。
 

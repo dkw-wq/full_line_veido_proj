@@ -192,7 +192,8 @@ public:
                     "min_client_mbps,p50_client_mbps,p95_client_mbps,p95_connect_ms,"
                     "loss,drop,avg_rtt_ms,loop_gap_max_ms,launch_lag_max_ms,"
                     "start_call_max_ms,event_batch_max_ms,event_batch_interval_max_ms,"
-                    "max_rcvbuf_packets,min_avail_rcvbuf_bytes\n";
+                    "max_rcvbuf_packets,min_avail_rcvbuf_bytes,"
+                    "handle_event_interval_max_ms,recv_call_interval_max_ms\n";
         }
     }
 
@@ -264,8 +265,12 @@ public:
                 throw std::runtime_error(std::string("srt_epoll_uwait: ") + srt_getlasterror_str());
             }
             const TimePoint batch_start = Clock::now();
-            for (int i = 0; i < std::min(count, static_cast<int>(events_.size())); ++i)
+            for (int i = 0; i < std::min(count, static_cast<int>(events_.size())); ++i) {
+                const TimePoint event_start = Clock::now();
                 handle_event(events_[i]);
+                max_handle_event_interval_ms_ = std::max(max_handle_event_interval_ms_,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - event_start).count());
+            }
             max_event_batch_ms_ = std::max(max_event_batch_ms_,
                 std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - batch_start).count());
             max_event_batch_interval_ms_ = std::max(max_event_batch_interval_ms_,
@@ -421,7 +426,10 @@ private:
         char buffer[4096];
         const int limit = c.slow ? 1 : 64;
         for (int i = 0; i < limit; ++i) {
+            const TimePoint recv_start = Clock::now();
             const int n = srt_recv(c.socket, buffer, sizeof(buffer));
+            max_recv_call_interval_ms_ = std::max(max_recv_call_interval_ms_,
+                std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - recv_start).count());
             if (n > 0) {
                 c.bytes += static_cast<uint64_t>(n);
                 c.last_data = Clock::now();
@@ -517,7 +525,9 @@ private:
                   << "ms event_batch_max=" << max_event_batch_ms_
                   << "ms event_batch_interval_max=" << max_event_batch_interval_ms_
                   << "ms max_rcvbuf_packets=" << max_rcvbuf_packets
-                  << " min_avail_rcvbuf_bytes=" << min_avail_rcvbuf_bytes << '\n';
+                  << " min_avail_rcvbuf_bytes=" << min_avail_rcvbuf_bytes
+                  << " handle_event_interval_max=" << max_handle_event_interval_ms_
+                  << "ms recv_call_interval_max=" << max_recv_call_interval_ms_ << "ms\n";
         if (csv_) {
             csv_ << std::fixed << std::setprecision(3)
                  << elapsed << ',' << attempted_ << ',' << active << ',' << connect_fail_ << ','
@@ -526,10 +536,13 @@ private:
                  << avg_rtt << ',' << max_loop_gap_ms_ << ',' << max_launch_lag_ms_ << ','
                  << max_start_call_ms_ << ',' << max_event_batch_ms_ << ','
                  << max_event_batch_interval_ms_ << ',' << max_rcvbuf_packets << ','
-                 << min_avail_rcvbuf_bytes << '\n';
+                 << min_avail_rcvbuf_bytes << ',' << max_handle_event_interval_ms_ << ','
+                 << max_recv_call_interval_ms_ << '\n';
             csv_.flush();
         }
         max_event_batch_interval_ms_ = 0;
+        max_handle_event_interval_ms_ = 0;
+        max_recv_call_interval_ms_ = 0;
     }
 
     const Options& options_;
@@ -547,6 +560,8 @@ private:
     int64_t max_start_call_ms_ = 0;
     int64_t max_event_batch_ms_ = 0;
     int64_t max_event_batch_interval_ms_ = 0;
+    int64_t max_handle_event_interval_ms_ = 0;
+    int64_t max_recv_call_interval_ms_ = 0;
     int attempted_ = 0;
     int connected_total_ = 0;
     int connect_fail_ = 0;
