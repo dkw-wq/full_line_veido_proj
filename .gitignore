@@ -7,5 +7,7 @@ build-asan/
 player_status.log
 load_test/build/
 load_test/*.csv
+load_test/results/*
+!load_test/results/.gitkeep
 srt_server/build
 pusher/build

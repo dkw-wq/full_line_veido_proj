@@ -11,10 +11,11 @@ cmake -S load_test -B load_test/build -G 'Visual Studio 17 2022' -A x64 "-DCMAKE
 cmake --build load_test/build --config Release
 ```
 
-先启动中继与一条持续推流（见根目录 README），再从本 PC 执行：
+先启动中继与一条持续推流（见根目录 README），再从本 PC 执行。压测记录统一放在 `load_test/results/`：
 
 ```powershell
-.\load_test\build\Release\srt_load_test.exe --host jfznbx.cn --port 9001 --clients 50 --ramp-ms 200 --duration-sec 120 --csv load_test\results.csv --trace load_test\trace.csv
+New-Item -ItemType Directory -Force load_test\results | Out-Null
+.\load_test\build\Release\srt_load_test.exe --host jfznbx.cn --port 9001 --clients 50 --ramp-ms 200 --duration-sec 120 --csv load_test\results\results.csv --trace load_test\results\trace.csv
 ```
 
 `--duration-sec` 从最后一个客户端**开始连接**后计时。默认参数：`--clients 1 --ramp-ms 200 --duration-sec 60 --latency-ms 20 --connect-timeout-ms 5000 --idle-ms 3000 --stream-id cam1`。用 `--help` 查看全部参数。要模拟慢客户端，可加 `--slow-every 10 --slow-read-ms 500`，使每第 10 个客户端每 500 毫秒只读一个包。程序给每路 SRT Stream ID 追加 `~lt-进程号-客户端号`，中继连接日志记录此 ID，便于跨端关联。
