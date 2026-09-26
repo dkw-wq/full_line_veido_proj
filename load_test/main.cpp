@@ -155,6 +155,8 @@ struct Client {
     int64_t loss = 0;
     int64_t drop = 0;
     double rtt_ms = 0;
+    int rcvbuf_packets = -1;
+    int avail_rcvbuf_bytes = -1;
     bool slow = false;
     bool slow_paused = false;
     int local_port = -1;
@@ -189,7 +191,8 @@ public:
             csv_ << "elapsed_s,attempted,connected,connect_fail,disconnect,idle,rx_mbps,"
                     "min_client_mbps,p50_client_mbps,p95_client_mbps,p95_connect_ms,"
                     "loss,drop,avg_rtt_ms,loop_gap_max_ms,launch_lag_max_ms,"
-                    "start_call_max_ms,event_batch_max_ms\n";
+                    "start_call_max_ms,event_batch_max_ms,event_batch_interval_max_ms,"
+                    "max_rcvbuf_packets,min_avail_rcvbuf_bytes\n";
         }
     }
 
@@ -265,6 +268,8 @@ public:
                 handle_event(events_[i]);
             max_event_batch_ms_ = std::max(max_event_batch_ms_,
                 std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - batch_start).count());
+            max_event_batch_interval_ms_ = std::max(max_event_batch_interval_ms_,
+                std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - batch_start).count());
         }
 
         const TimePoint now = Clock::now();
@@ -339,6 +344,8 @@ private:
             c.loss = stats.pktRcvLossTotal;
             c.drop = stats.pktRcvDropTotal;
             c.rtt_ms = stats.msRTT;
+            c.rcvbuf_packets = stats.pktRcvBuf;
+            c.avail_rcvbuf_bytes = stats.byteAvailRcvBuf;
         }
     }
 
@@ -456,6 +463,8 @@ private:
         int rtt_count = 0;
         int64_t loss = 0;
         int64_t drop = 0;
+        int max_rcvbuf_packets = -1;
+        int min_avail_rcvbuf_bytes = -1;
         uint64_t delta_bytes = 0;
         double rtt_sum = 0;
         std::vector<double> rates;
@@ -471,6 +480,11 @@ private:
                 capture_stats(c);
                 rtt_sum += c.rtt_ms;
                 ++rtt_count;
+                if (c.rcvbuf_packets >= 0)
+                    max_rcvbuf_packets = std::max(max_rcvbuf_packets, c.rcvbuf_packets);
+                if (c.avail_rcvbuf_bytes >= 0 &&
+                    (min_avail_rcvbuf_bytes < 0 || c.avail_rcvbuf_bytes < min_avail_rcvbuf_bytes))
+                    min_avail_rcvbuf_bytes = c.avail_rcvbuf_bytes;
             }
             if (c.connect_ms >= 0) connect_times.push_back(c.connect_ms);
             loss += c.loss;
@@ -500,16 +514,22 @@ private:
         std::cout << "  loop_gap_max=" << max_loop_gap_ms_
                   << "ms launch_lag_max=" << max_launch_lag_ms_
                   << "ms start_call_max=" << max_start_call_ms_
-                  << "ms event_batch_max=" << max_event_batch_ms_ << "ms\n";
+                  << "ms event_batch_max=" << max_event_batch_ms_
+                  << "ms event_batch_interval_max=" << max_event_batch_interval_ms_
+                  << "ms max_rcvbuf_packets=" << max_rcvbuf_packets
+                  << " min_avail_rcvbuf_bytes=" << min_avail_rcvbuf_bytes << '\n';
         if (csv_) {
             csv_ << std::fixed << std::setprecision(3)
                  << elapsed << ',' << attempted_ << ',' << active << ',' << connect_fail_ << ','
                  << disconnect_ << ',' << idle << ',' << total_mbps << ',' << minimum << ','
                  << p50 << ',' << p95 << ',' << p95_connect << ',' << loss << ',' << drop << ','
                  << avg_rtt << ',' << max_loop_gap_ms_ << ',' << max_launch_lag_ms_ << ','
-                 << max_start_call_ms_ << ',' << max_event_batch_ms_ << '\n';
+                 << max_start_call_ms_ << ',' << max_event_batch_ms_ << ','
+                 << max_event_batch_interval_ms_ << ',' << max_rcvbuf_packets << ','
+                 << min_avail_rcvbuf_bytes << '\n';
             csv_.flush();
         }
+        max_event_batch_interval_ms_ = 0;
     }
 
     const Options& options_;
@@ -526,6 +546,7 @@ private:
     int64_t max_launch_lag_ms_ = 0;
     int64_t max_start_call_ms_ = 0;
     int64_t max_event_batch_ms_ = 0;
+    int64_t max_event_batch_interval_ms_ = 0;
     int attempted_ = 0;
     int connected_total_ = 0;
     int connect_fail_ = 0;
