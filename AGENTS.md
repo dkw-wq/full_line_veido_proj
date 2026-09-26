@@ -27,6 +27,6 @@ ssh -p 22 root@47.100.227.26
 
 ```text
 1.每完成一个功能提交git
-2.PC端代码需和server端保持一致，即一端git push了另一端要git pull
+2.PC端代码需和server端保持一致，即通过一端git push另一端要git pull
 ```
 
