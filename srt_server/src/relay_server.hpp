@@ -513,6 +513,8 @@ private:
                     << " nic=" << (host.nic.empty() ? "unknown" : host.nic)
                     << " nic_rx=" << host.nic_rx_mbps << "Mbps"
                     << " nic_tx=" << host.nic_tx_mbps << "Mbps"
+                    << " lo_rx=" << host.loopback_rx_mbps << "Mbps"
+                    << " lo_tx=" << host.loopback_tx_mbps << "Mbps"
                     << " cpu=" << host.cpu_percent << "%"
                     << " mem_avail=" << host.mem_available_mb << "MB"
                     << " rss=" << host.process_rss_mb << "MB";
@@ -551,6 +553,8 @@ private:
                   << "\"host_nic\":\"" << host.nic << "\","
                   << "\"host_nic_rx_mbps\":" << host.nic_rx_mbps << ","
                   << "\"host_nic_tx_mbps\":" << host.nic_tx_mbps << ","
+                  << "\"host_loopback_rx_mbps\":" << host.loopback_rx_mbps << ","
+                  << "\"host_loopback_tx_mbps\":" << host.loopback_tx_mbps << ","
                   << "\"host_cpu_percent\":" << host.cpu_percent << ","
                   << "\"host_mem_available_mb\":" << host.mem_available_mb << ","
                   << "\"relay_rss_mb\":" << host.process_rss_mb << ","

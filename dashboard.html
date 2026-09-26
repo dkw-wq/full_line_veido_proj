@@ -341,10 +341,12 @@
   <div class="metric-card">
     <div class="label">主机网卡接收 <span id="m-nic-name"></span></div>
     <div class="value" id="m-nic-rx">—<span class="unit">Mbps</span></div>
+    <div class="label">本机回环接收 <span id="m-lo-rx">—</span> Mbps</div>
   </div>
   <div class="metric-card">
     <div class="label">主机网卡发送</div>
     <div class="value" id="m-nic-tx">—<span class="unit">Mbps</span></div>
+    <div class="label">本机回环发送 <span id="m-lo-tx">—</span> Mbps</div>
   </div>
   <div class="metric-card">
     <div class="label">主机 CPU</div>
@@ -577,6 +579,8 @@ function handleMsg(data) {
   $('m-nic-name').textContent = d.host_nic || '';
   $('m-nic-rx').innerHTML = fmtSample(d.host_nic_rx_mbps) + '<span class="unit">Mbps</span>';
   $('m-nic-tx').innerHTML = fmtSample(d.host_nic_tx_mbps) + '<span class="unit">Mbps</span>';
+  $('m-lo-rx').textContent = fmtSample(d.host_loopback_rx_mbps);
+  $('m-lo-tx').textContent = fmtSample(d.host_loopback_tx_mbps);
   $('m-host-cpu').innerHTML = fmtSample(d.host_cpu_percent, 1) + '<span class="unit">%</span>';
   $('m-host-mem').innerHTML = fmtSample(d.host_mem_available_mb, 0) + ' / '
     + fmtSample(d.relay_rss_mb, 0) + '<span class="unit">MB</span>';

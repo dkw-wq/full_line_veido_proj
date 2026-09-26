@@ -70,4 +70,4 @@ ffplay 'srt://<中继地址>:9001?mode=caller&latency=120'
 
 ## 6. PC 端拉流压测
 
-使用 [`load_test/README.md`](load_test/README.md) 中的无界面压测程序，按指定连接数逐步拉取 `9001` 端口的流，并输出每秒连接、吞吐、丢包、RTT 和事件循环延迟统计；加 `--trace` 保存每路连接事件。中继每个监测周期向 journald 写 `STAT` 和 `SUBSTAT`，含主机默认路由网卡速率、CPU、可用内存及每路 SRT 缓冲/重传指标；Dashboard 展示这些实时指标。查看：`journalctl -u srt-server -f`。
+使用 [`load_test/README.md`](load_test/README.md) 中的无界面压测程序，按指定连接数逐步拉取 `9001` 端口的流，并输出每秒连接、吞吐、丢包、RTT 和事件循环延迟统计；加 `--trace` 保存每路连接事件。中继每个监测周期向 journald 写 `STAT` 和 `SUBSTAT`，含主机默认路由网卡及本机回环速率、CPU、可用内存及每路 SRT 缓冲/重传指标；Dashboard 展示这些实时指标。查看：`journalctl -u srt-server -f`。
