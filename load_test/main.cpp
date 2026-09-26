@@ -172,7 +172,11 @@ public:
         if (epoll_id_ < 0) throw std::runtime_error("srt_epoll_create failed");
         if (!options_.trace_path.empty()) {
             trace_.open(options_.trace_path, std::ios::out | std::ios::trunc);
-            if (!trace_) throw std::runtime_error("cannot open trace: " + options_.trace_path);
+            if (!trace_) {
+                srt_epoll_release(epoll_id_);
+                epoll_id_ = -1;
+                throw std::runtime_error("cannot open trace: " + options_.trace_path);
+            }
             trace_ << "wall_time,elapsed_ms,client,event,local_port,srt_socket,srt_state,connect_ms,launch_lag_ms,loop_gap_max_ms,stream_id,detail\n";
         }
         if (!options_.csv_path.empty()) {
