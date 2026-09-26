@@ -214,14 +214,16 @@ public:
             last_loop_ = loop_at;
             while (attempted_ < options_.clients && Clock::now() >= next_start) {
                 const TimePoint attempt_at = Clock::now();
+                const TimePoint planned_start = start +
+                    std::chrono::milliseconds(static_cast<int64_t>(attempted_) * options_.ramp_ms);
                 clients_[attempted_].launch_lag_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(attempt_at - next_start).count();
+                    std::chrono::duration_cast<std::chrono::milliseconds>(attempt_at - planned_start).count();
                 max_launch_lag_ms_ = std::max(max_launch_lag_ms_, clients_[attempted_].launch_lag_ms);
                 start_client(clients_[attempted_], attempted_ + 1, attempt_at);
                 max_start_call_ms_ = std::max(max_start_call_ms_,
                     std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - attempt_at).count());
                 ++attempted_;
-                next_start += std::chrono::milliseconds(options_.ramp_ms);
+                next_start = attempt_at + std::chrono::milliseconds(options_.ramp_ms);
             }
             if (!finish_set && attempted_ == options_.clients) {
                 finish = Clock::now() + std::chrono::seconds(options_.duration_sec);
