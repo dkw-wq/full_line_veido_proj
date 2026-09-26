@@ -7,6 +7,14 @@ struct StreamChunk {
 class SubscriberSession {
 public:
     enum class SendResult { Empty, Sent, Blocked, Failed };
+    struct SrtMetrics {
+        bool valid = false;
+        int send_buf_packets = -1;
+        int avail_send_buf_bytes = -1;
+        int retrans_total = -1;
+        int send_loss_total = -1;
+        double rtt_ms = -1;
+    };
 
     SubscriberSession(SRTSOCKET sock, sockaddr_in peer,
                       StreamStatus& status, const Config& cfg, uint64_t id)
@@ -16,7 +24,8 @@ public:
         latency_ms_.store(read_latency(sock_));
         log_line("INFO", "subscriber connected: " + sockaddr_to_string(peer_));
         dump_srt_latency("[SUB]", sock_);
-        log_line("INFO", "sub#" + std::to_string(id_) + " started: " + this->peer());
+        log_line("INFO", "sub#" + std::to_string(id_) + " started: " + this->peer() +
+                         " streamid=" + stream_id());
     }
     ~SubscriberSession() { stop(); }
 
@@ -24,7 +33,7 @@ public:
         if (stopped_.exchange(true)) return;
         running_.store(false);
         { std::lock_guard<std::mutex> lk(mu_); queue_.clear(); }
-        srt_close(sock_);
+        { std::lock_guard<std::mutex> lk(stats_mu_); srt_close(sock_); }
         status_.subscriber_count.fetch_sub(1);
         log_line("INFO", "sub#" + std::to_string(id_) + " stopped");
     }
@@ -99,6 +108,20 @@ public:
     int64_t last_active_ms() const { return last_active_ms_.load(); }
     int queue_depth() const { std::lock_guard<std::mutex> lk(mu_); return (int)queue_.size(); }
     int latency_ms() const { return latency_ms_.load(); }
+    SrtMetrics srt_metrics() const {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        SrtMetrics m;
+        if (stopped_.load()) return m;
+        SRT_TRACEBSTATS stats{};
+        if (srt_bstats(sock_, &stats, 0) != 0) return m;
+        m.valid = true;
+        m.send_buf_packets = stats.pktSndBuf;
+        m.avail_send_buf_bytes = stats.byteAvailSndBuf;
+        m.retrans_total = stats.pktRetransTotal;
+        m.send_loss_total = stats.pktSndLossTotal;
+        m.rtt_ms = stats.msRTT;
+        return m;
+    }
     SubscriberAction control_action() const {
         return (SubscriberAction)control_action_.load(std::memory_order_relaxed);
     }
@@ -150,6 +173,15 @@ private:
         if (srt_getsockflag(s, SRTO_LATENCY, &v, &l) == 0) return v;
         return -1;
     }
+    std::string stream_id() const {
+        char value[513]{};
+        int length = sizeof(value) - 1;
+        if (srt_getsockflag(sock_, SRTO_STREAMID, value, &length) != 0) return "unknown";
+        std::string id(value, value + std::max(0, std::min(length, 512)));
+        while (!id.empty() && id.back() == '\0') id.pop_back();
+        for (char& ch : id) if (ch < 32 || ch > 126) ch = '?';
+        return id;
+    }
     void set_control_action(SubscriberAction action) {
         SubscriberAction old = (SubscriberAction)control_action_.exchange((int)action, std::memory_order_relaxed);
         if (old == action) return;
@@ -168,6 +200,7 @@ private:
     const Config& cfg_;
     uint64_t id_;
     mutable std::mutex mu_;
+    mutable std::mutex stats_mu_;
     std::deque<std::shared_ptr<const StreamChunk>> queue_;
     bool synced_ = false;
     uint8_t placeholder_cc_ = 0;

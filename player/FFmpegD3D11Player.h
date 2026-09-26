@@ -20,9 +20,12 @@ extern "C" {
 
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -42,7 +45,8 @@ public:
     explicit FFmpegD3D11Player(HWND hwnd,
                             std::string url,
                             QObject* parent = nullptr)
-        : QObject(parent), hwnd_(hwnd), url_(std::move(url)) {
+        : QObject(parent), hwnd_(hwnd), url_(std::move(url)),
+          instance_id_(next_player_id_.fetch_add(1)) {
         status_.url = QString::fromStdString(url_);
     }
 
@@ -169,6 +173,19 @@ signals:
     void statusChanged(const PlayerStatus& status);
 
 private:
+    static std::string tagged_url(const std::string& url, const std::string& id) {
+        if (url.rfind("srt://", 0) != 0) return url;
+        const size_t query = url.find('?');
+        const size_t key = url.find("streamid=", query == std::string::npos ? url.size() : query + 1);
+        if (key == std::string::npos || (key > query + 1 && url[key - 1] != '&'))
+            return url + (query == std::string::npos ? "?" : "&") + "streamid=" + id;
+        const size_t value_start = key + 9;
+        const size_t value_end = url.find('&', value_start);
+        std::string tagged = url;
+        tagged.insert(value_end == std::string::npos ? url.size() : value_end, "~" + id);
+        return tagged;
+    }
+
     template<typename Fn>
     void mutateStatus(Fn&& fn) {
         {
@@ -187,9 +204,22 @@ private:
 
     void setPlaybackStatus(PlayerState state, PlayerErrorCode error, const QString& message,
                            bool audio_available_override = false, bool set_audio = false) {
-        const auto line = std::string("[player] ") + message.toLocal8Bit().constData() + "\n";
-        std::cerr << line;
-        std::ofstream("player_status.log", std::ios::app) << line;
+        const auto now = std::chrono::system_clock::now();
+        const auto tt = std::chrono::system_clock::to_time_t(now);
+        std::tm tm{};
+        localtime_s(&tm, &tt);
+        std::ostringstream out;
+        out << '[' << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << ']'
+            << " [player] conn=" << connection_id_
+            << " state=" << static_cast<int>(state)
+            << " error=" << static_cast<int>(error)
+            << " reconnect=" << reconnect_count_ << ' '
+            << message.toLocal8Bit().constData() << '\n';
+        {
+            std::lock_guard<std::mutex> lk(log_mutex_);
+            std::cerr << out.str();
+            std::ofstream("player_status.log", std::ios::app) << out.str();
+        }
         mutateStatus([&](PlayerStatus& s) {
             s.state           = state;
             s.error           = error;
@@ -203,9 +233,12 @@ private:
     void run() {
         while (!stopFlag_.load()) {
             video_synced_ = false;
+            connection_id_ = "pl-" + std::to_string(GetCurrentProcessId()) + "-" +
+                             std::to_string(instance_id_) + "-" + std::to_string(++attempt_id_);
+            const std::string active_url = tagged_url(url_, connection_id_);
 
             setPlaybackStatus(PlayerState::OpeningInput, PlayerErrorCode::None,
-                              "正在连接 " + QString::fromStdString(url_));
+                              "正在连接 " + QString::fromStdString(active_url));
 
             AVFormatContext* fmt_ctx = avformat_alloc_context();
             if (!fmt_ctx) {
@@ -223,7 +256,7 @@ private:
             av_dict_set(&opts, "analyzeduration", "500000",   0);
             av_dict_set(&opts, "probesize",       "32768",    0);
 
-            int open_ret = avformat_open_input(&fmt_ctx, url_.c_str(), nullptr, &opts);
+            int open_ret = avformat_open_input(&fmt_ctx, active_url.c_str(), nullptr, &opts);
             av_dict_free(&opts);
             if (open_ret < 0) {
                 char eb[AV_ERROR_MAX_STRING_SIZE]{};
@@ -413,6 +446,11 @@ private:
 private:
     HWND        hwnd_;
     std::string url_;
+    static inline std::atomic<uint64_t> next_player_id_{1};
+    static inline std::mutex log_mutex_;
+    uint64_t instance_id_ = 0;
+    uint64_t attempt_id_ = 0;
+    std::string connection_id_ = "none";
     std::thread worker_;
 
     mutable std::mutex lifecycleMutex_;

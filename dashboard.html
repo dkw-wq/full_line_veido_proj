@@ -337,6 +337,25 @@
   </div>
 </div>
 
+<div class="grid-4" style="margin-bottom:16px">
+  <div class="metric-card">
+    <div class="label">主机网卡接收 <span id="m-nic-name"></span></div>
+    <div class="value" id="m-nic-rx">—<span class="unit">Mbps</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">主机网卡发送</div>
+    <div class="value" id="m-nic-tx">—<span class="unit">Mbps</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">主机 CPU</div>
+    <div class="value" id="m-host-cpu">—<span class="unit">%</span></div>
+  </div>
+  <div class="metric-card">
+    <div class="label">主机可用 / 中继 RSS</div>
+    <div class="value" id="m-host-mem">—<span class="unit">MB</span></div>
+  </div>
+</div>
+
 <div class="card">
   <div class="legend">
     <span><span class="legend-dot" style="background:#378add"></span>入流 Mbps</span>
@@ -375,6 +394,10 @@ const $ = id => document.getElementById(id);
 function fmt(n, dec=2) {
   if (n == null || isNaN(n)) return '—';
   return Number(n).toFixed(dec);
+}
+
+function fmtSample(n, dec=2) {
+  return n == null || n < 0 ? '—' : fmt(n, dec);
 }
 
 function fmtMs(ms) {
@@ -492,6 +515,11 @@ function renderSubs(list) {
     + '<th>Relay→ACK</th>'
     + '<th>Push→ACK</th>'
     + '<th>队列深度</th>'
+    + '<th>SRT 发送缓冲包</th>'
+    + '<th>可用发送缓冲</th>'
+    + '<th>重传累计</th>'
+    + '<th>发送缺包累计</th>'
+    + '<th>SRT RTT</th>'
     + '<th>控制</th>'
     + '<th>ACK 新鲜度</th>'
     + '<th>空闲</th>'
@@ -513,6 +541,11 @@ function renderSubs(list) {
       <td><span class="badge badge-amber">${(s.telemetry_relay_to_ack_ms != null && s.telemetry_relay_to_ack_ms >= 0) ? fmt(s.telemetry_relay_to_ack_ms, 2) + ' ms' : '—'}</span></td>
       <td><span class="badge badge-green">${(s.telemetry_push_to_ack_ms != null && s.telemetry_push_to_ack_ms >= 0) ? fmt(s.telemetry_push_to_ack_ms, 2) + ' ms' : '—'}</span></td>
       <td>${s.q}</td>
+      <td>${fmtSample(s.srt_sndbuf_pkts, 0)}</td>
+      <td>${fmtSample(s.srt_avail_sndbuf_bytes, 0)} B</td>
+      <td>${fmtSample(s.srt_retrans_total, 0)}</td>
+      <td>${fmtSample(s.srt_send_loss_total, 0)}</td>
+      <td>${fmtSample(s.srt_rtt_ms, 1)} ms</td>
       <td><span class="${ctrlBadge(s.ctrl)}">${s.ctrl || 'NORMAL'}</span></td>
       <td><span class="${ackFreshCls}">${fmtMs(s.telemetry_last_ack_ms)}</span></td>
       <td><span class="${idleCls}">${fmtMs(idle)}</span></td>
@@ -541,6 +574,12 @@ function handleMsg(data) {
   $('m-out').innerHTML  = fmt(d.egress_mbps) + '<span class="unit">Mbps</span>';
   $('m-tin').innerHTML  = fmt(d.total_ingress_mb, 1) + '<span class="unit">MB</span>';
   $('m-tout').innerHTML = fmt(d.total_egress_mb, 1) + '<span class="unit">MB</span>';
+  $('m-nic-name').textContent = d.host_nic || '';
+  $('m-nic-rx').innerHTML = fmtSample(d.host_nic_rx_mbps) + '<span class="unit">Mbps</span>';
+  $('m-nic-tx').innerHTML = fmtSample(d.host_nic_tx_mbps) + '<span class="unit">Mbps</span>';
+  $('m-host-cpu').innerHTML = fmtSample(d.host_cpu_percent, 1) + '<span class="unit">%</span>';
+  $('m-host-mem').innerHTML = fmtSample(d.host_mem_available_mb, 0) + ' / '
+    + fmtSample(d.relay_rss_mb, 0) + '<span class="unit">MB</span>';
 
   const discEl = $('m-disc');
   discEl.textContent = d.ts_disc ?? '—';

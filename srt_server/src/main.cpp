@@ -20,6 +20,7 @@
 #include <deque>
 #include <functional>
 #include <iomanip>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -42,6 +43,7 @@
 namespace {
 
 #include "server_context.hpp"
+#include "host_monitor.hpp"
 #include "ws_broadcaster.hpp"
 #include "ts_validator.hpp"
 #include "subscriber_controller.hpp"

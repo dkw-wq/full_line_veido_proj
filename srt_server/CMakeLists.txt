@@ -12,6 +12,7 @@ add_executable(srt_relay_server
     src/main.cpp
     src/ws_util.hpp
     src/server_context.hpp
+    src/host_monitor.hpp
     src/ws_broadcaster.hpp
     src/ts_validator.hpp
     src/subscriber_controller.hpp

@@ -6,9 +6,11 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -26,6 +28,7 @@ struct Options {
     std::string host = "jfznbx.cn";
     std::string stream_id = "cam1";
     std::string csv_path;
+    std::string trace_path;
     int port = 9001;
     int clients = 1;
     int ramp_ms = 200;
@@ -53,6 +56,7 @@ void print_usage() {
         << "  --slow-every N              make every Nth receiver slow (default 0)\n"
         << "  --slow-read-ms N            interval for one slow read (default 500)\n"
         << "  --csv FILE                  write one summary row per second\n"
+        << "  --trace FILE                write per-client connection events\n"
         << "  --help                      show this help\n";
 }
 
@@ -89,10 +93,11 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--slow-every") o.slow_every = parse_number(value, 0, 4096, "slow-every");
         else if (arg == "--slow-read-ms") o.slow_read_ms = parse_number(value, 1, 60000, "slow-read-ms");
         else if (arg == "--csv") o.csv_path = value;
+        else if (arg == "--trace") o.trace_path = value;
         else throw std::runtime_error("unknown option: " + arg);
     }
     if (o.host.empty()) throw std::runtime_error("host must not be empty");
-    if (o.stream_id.size() > 512) throw std::runtime_error("stream-id is too long");
+    if (o.stream_id.size() > 480) throw std::runtime_error("stream-id is too long (max 480 with trace tag)");
     return o;
 }
 
@@ -152,7 +157,10 @@ struct Client {
     double rtt_ms = 0;
     bool slow = false;
     bool slow_paused = false;
+    int local_port = -1;
+    int64_t launch_lag_ms = 0;
     std::string end_reason;
+    std::string stream_id;
 };
 
 class LoadTest {
@@ -162,6 +170,11 @@ public:
           events_(static_cast<size_t>(options.clients) + 8) {
         epoll_id_ = srt_epoll_create();
         if (epoll_id_ < 0) throw std::runtime_error("srt_epoll_create failed");
+        if (!options_.trace_path.empty()) {
+            trace_.open(options_.trace_path, std::ios::out | std::ios::trunc);
+            if (!trace_) throw std::runtime_error("cannot open trace: " + options_.trace_path);
+            trace_ << "wall_time,elapsed_ms,client,event,local_port,srt_socket,srt_state,connect_ms,launch_lag_ms,loop_gap_max_ms,stream_id,detail\n";
+        }
         if (!options_.csv_path.empty()) {
             csv_.open(options_.csv_path, std::ios::out | std::ios::trunc);
             if (!csv_) {
@@ -171,7 +184,8 @@ public:
             }
             csv_ << "elapsed_s,attempted,connected,connect_fail,disconnect,idle,rx_mbps,"
                     "min_client_mbps,p50_client_mbps,p95_client_mbps,p95_connect_ms,"
-                    "loss,drop,avg_rtt_ms\n";
+                    "loss,drop,avg_rtt_ms,loop_gap_max_ms,launch_lag_max_ms,"
+                    "start_call_max_ms,event_batch_max_ms\n";
         }
     }
 
@@ -182,6 +196,8 @@ public:
 
     int run() {
         const TimePoint start = Clock::now();
+        test_start_ = start;
+        last_loop_ = start;
         TimePoint next_start = start;
         TimePoint last_report = start;
         TimePoint finish{};
@@ -192,11 +208,20 @@ public:
                   << " duration_sec=" << options_.duration_sec << '\n';
 
         while (!stop_requested) {
+            const TimePoint loop_at = Clock::now();
+            max_loop_gap_ms_ = std::max(max_loop_gap_ms_,
+                std::chrono::duration_cast<std::chrono::milliseconds>(loop_at - last_loop_).count());
+            last_loop_ = loop_at;
             while (attempted_ < options_.clients && Clock::now() >= next_start) {
                 const TimePoint attempt_at = Clock::now();
+                clients_[attempted_].launch_lag_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(attempt_at - next_start).count();
+                max_launch_lag_ms_ = std::max(max_launch_lag_ms_, clients_[attempted_].launch_lag_ms);
                 start_client(clients_[attempted_], attempted_ + 1, attempt_at);
+                max_start_call_ms_ = std::max(max_start_call_ms_,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - attempt_at).count());
                 ++attempted_;
-                next_start = attempt_at + std::chrono::milliseconds(options_.ramp_ms);
+                next_start += std::chrono::milliseconds(options_.ramp_ms);
             }
             if (!finish_set && attempted_ == options_.clients) {
                 finish = Clock::now() + std::chrono::seconds(options_.duration_sec);
@@ -229,8 +254,11 @@ public:
             if (count == SRT_ERROR) {
                 throw std::runtime_error(std::string("srt_epoll_uwait: ") + srt_getlasterror_str());
             }
+            const TimePoint batch_start = Clock::now();
             for (int i = 0; i < std::min(count, static_cast<int>(events_.size())); ++i)
                 handle_event(events_[i]);
+            max_event_batch_ms_ = std::max(max_event_batch_ms_,
+                std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - batch_start).count());
         }
 
         const TimePoint now = Clock::now();
@@ -246,6 +274,52 @@ public:
     }
 
 private:
+    static const char* state_name(SRT_SOCKSTATUS state) {
+        switch (state) {
+            case SRTS_INIT: return "INIT";
+            case SRTS_OPENED: return "OPENED";
+            case SRTS_LISTENING: return "LISTENING";
+            case SRTS_CONNECTING: return "CONNECTING";
+            case SRTS_CONNECTED: return "CONNECTED";
+            case SRTS_BROKEN: return "BROKEN";
+            case SRTS_CLOSING: return "CLOSING";
+            case SRTS_CLOSED: return "CLOSED";
+            case SRTS_NONEXIST: return "NONEXIST";
+            default: return "UNKNOWN";
+        }
+    }
+
+    void refresh_local_port(Client& c) {
+        if (c.socket == SRT_INVALID_SOCK) return;
+        sockaddr_in local{};
+        int len = sizeof(local);
+        if (srt_getsockname(c.socket, reinterpret_cast<sockaddr*>(&local), &len) == 0)
+            c.local_port = ntohs(local.sin_port);
+    }
+
+    void trace_event(Client& c, const char* event, const std::string& detail = {}) {
+        refresh_local_port(c);
+        const auto now = std::chrono::system_clock::now();
+        const auto tt = std::chrono::system_clock::to_time_t(now);
+        std::tm tm{};
+        localtime_s(&tm, &tt);
+        auto csv_text = [](const std::string& value) {
+            std::string quoted = "\"";
+            for (char ch : value) quoted += ch == '"' ? "\"\"" : std::string(1, ch);
+            return quoted + '"';
+        };
+        std::ostringstream line;
+        line << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << ','
+             << std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - test_start_).count() << ','
+             << c.id << ',' << event << ',' << c.local_port << ',' << c.socket << ','
+             << (c.socket == SRT_INVALID_SOCK ? "INVALID" : state_name(srt_getsockstate(c.socket))) << ','
+             << std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - c.started).count() << ','
+             << c.launch_lag_ms << ',' << max_loop_gap_ms_ << ','
+             << csv_text(c.stream_id) << ',' << csv_text(detail) << '\n';
+        if (trace_) { trace_ << line.str(); trace_.flush(); }
+        if (std::string(event) == "failed") std::cerr << line.str();
+    }
+
     void update_events(Client& c, int flags) {
         if (c.socket != SRT_INVALID_SOCK &&
             srt_epoll_update_usock(epoll_id_, c.socket, &flags) == SRT_ERROR)
@@ -265,13 +339,10 @@ private:
     void close_client(Client& c, const std::string& reason, bool finished = false) {
         if (c.phase == Phase::Pending || c.phase == Phase::Closed) return;
         capture_stats(c);
+        trace_event(c, finished ? "finished" : "failed", reason);
         if (!finished) {
             if (c.phase == Phase::Connecting) ++connect_fail_;
             if (c.phase == Phase::Connected) ++disconnect_;
-            if (printed_errors_ < 10) {
-                std::cerr << "client#" << c.id << ": " << reason << '\n';
-                ++printed_errors_;
-            }
         }
         c.end_reason = reason;
         c.phase = Phase::Closed;
@@ -288,6 +359,9 @@ private:
         c.phase = Phase::Connecting;
         c.started = now;
         c.slow = options_.slow_every > 0 && id % options_.slow_every == 0;
+        if (!options_.stream_id.empty())
+            c.stream_id = options_.stream_id + "~lt-" + std::to_string(GetCurrentProcessId()) +
+                          "-" + std::to_string(id);
         c.socket = srt_create_socket();
         if (c.socket == SRT_INVALID_SOCK) { close_client(c, "socket creation failed"); return; }
 
@@ -303,9 +377,9 @@ private:
             !set(SRTO_PEERLATENCY, &latency, sizeof(latency)) ||
             !set(SRTO_CONNTIMEO, &timeout, sizeof(timeout)) ||
             !set(SRTO_RCVSYN, &nonblocking, sizeof(nonblocking)) ||
-            (!options_.stream_id.empty() &&
-             !set(SRTO_STREAMID, options_.stream_id.data(),
-                  static_cast<int>(options_.stream_id.size())))) {
+            (!c.stream_id.empty() &&
+             !set(SRTO_STREAMID, c.stream_id.data(),
+                  static_cast<int>(c.stream_id.size())))) {
             close_client(c, std::string("socket option: ") + srt_getlasterror_str());
             return;
         }
@@ -317,6 +391,7 @@ private:
         by_socket_[c.socket] = static_cast<size_t>(id - 1);
         if (srt_connect(c.socket, reinterpret_cast<const sockaddr*>(&target_), sizeof(target_)) == SRT_ERROR)
             close_client(c, std::string("connect: ") + srt_getlasterror_str());
+        else trace_event(c, "connecting", c.stream_id);
     }
 
     void connected(Client& c, TimePoint now) {
@@ -325,6 +400,7 @@ private:
         c.last_data = now;
         c.connect_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - c.started).count();
         ++connected_total_;
+        trace_event(c, "connected");
         update_events(c, SRT_EPOLL_IN | SRT_EPOLL_ERR);
     }
 
@@ -339,7 +415,7 @@ private:
             } else if (n == SRT_ERROR && srt_getlasterror(nullptr) == SRT_EASYNCRCV) {
                 break;
             } else {
-                close_client(c, n == 0 ? "end of stream" : "receive failed");
+                close_client(c, n == 0 ? "end of stream" : std::string("receive: ") + srt_getlasterror_str());
                 return;
             }
         }
@@ -355,7 +431,7 @@ private:
         if (it == by_socket_.end()) return;
         Client& c = clients_[it->second];
         if (event.events & SRT_EPOLL_ERR) {
-            close_client(c, "SRT socket error");
+            close_client(c, std::string("SRT socket error: ") + srt_getlasterror_str());
             return;
         }
         if (c.phase == Phase::Connecting && (event.events & SRT_EPOLL_OUT)) {
@@ -415,12 +491,17 @@ private:
                   << minimum << '/' << p50 << '/' << p95
                   << "Mbps connect_p95=" << p95_connect << "ms loss=" << loss << " drop=" << drop
                   << " rtt=" << avg_rtt << "ms\n";
+        std::cout << "  loop_gap_max=" << max_loop_gap_ms_
+                  << "ms launch_lag_max=" << max_launch_lag_ms_
+                  << "ms start_call_max=" << max_start_call_ms_
+                  << "ms event_batch_max=" << max_event_batch_ms_ << "ms\n";
         if (csv_) {
             csv_ << std::fixed << std::setprecision(3)
                  << elapsed << ',' << attempted_ << ',' << active << ',' << connect_fail_ << ','
                  << disconnect_ << ',' << idle << ',' << total_mbps << ',' << minimum << ','
                  << p50 << ',' << p95 << ',' << p95_connect << ',' << loss << ',' << drop << ','
-                 << avg_rtt << '\n';
+                 << avg_rtt << ',' << max_loop_gap_ms_ << ',' << max_launch_lag_ms_ << ','
+                 << max_start_call_ms_ << ',' << max_event_batch_ms_ << '\n';
             csv_.flush();
         }
     }
@@ -432,11 +513,17 @@ private:
     std::vector<SRT_EPOLL_EVENT> events_;
     std::unordered_map<SRTSOCKET, size_t> by_socket_;
     std::ofstream csv_;
+    std::ofstream trace_;
+    TimePoint test_start_{};
+    TimePoint last_loop_{};
+    int64_t max_loop_gap_ms_ = 0;
+    int64_t max_launch_lag_ms_ = 0;
+    int64_t max_start_call_ms_ = 0;
+    int64_t max_event_batch_ms_ = 0;
     int attempted_ = 0;
     int connected_total_ = 0;
     int connect_fail_ = 0;
     int disconnect_ = 0;
-    int printed_errors_ = 0;
 };
 
 int main(int argc, char** argv) {

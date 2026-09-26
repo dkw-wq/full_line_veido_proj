@@ -14,10 +14,10 @@ cmake --build load_test/build --config Release
 先启动中继与一条持续推流（见根目录 README），再从本 PC 执行：
 
 ```powershell
-.\load_test\build\Release\srt_load_test.exe --host jfznbx.cn --port 9001 --clients 50 --ramp-ms 200 --duration-sec 120 --csv load_test\results.csv
+.\load_test\build\Release\srt_load_test.exe --host jfznbx.cn --port 9001 --clients 50 --ramp-ms 200 --duration-sec 120 --csv load_test\results.csv --trace load_test\trace.csv
 ```
 
-`--duration-sec` 从最后一个客户端**开始连接**后计时。默认参数：`--clients 1 --ramp-ms 200 --duration-sec 60 --latency-ms 20 --connect-timeout-ms 5000 --idle-ms 3000 --stream-id cam1`。用 `--help` 查看全部参数。要模拟慢客户端，可加 `--slow-every 10 --slow-read-ms 500`，使每第 10 个客户端每 500 毫秒只读一个包。
+`--duration-sec` 从最后一个客户端**开始连接**后计时。默认参数：`--clients 1 --ramp-ms 200 --duration-sec 60 --latency-ms 20 --connect-timeout-ms 5000 --idle-ms 3000 --stream-id cam1`。用 `--help` 查看全部参数。要模拟慢客户端，可加 `--slow-every 10 --slow-read-ms 500`，使每第 10 个客户端每 500 毫秒只读一个包。程序给每路 SRT Stream ID 追加 `~lt-进程号-客户端号`，中继连接日志记录此 ID，便于跨端关联。
 
 ## CSV 字段
 
@@ -39,9 +39,15 @@ CSV 每行是一次采样，通常间隔约 1 秒；计算码率时使用实际�
 | `loss` | 客户端累计检测到的 SRT 缺包数，部分缺包可能已通过重传恢复。 |
 | `drop` | 客户端累计因数据到达过晚而丢弃的 SRT 包数；不同于中继的 `queue_drops`。 |
 | `avg_rtt_ms` | 本次采样时所有在线客户端的平均 SRT 往返时延，单位毫秒；不是端到端画面延迟。 |
+| `loop_gap_max_ms` | 截至本次采样，主事件循环两次迭代间隔的最大值；包括正常的最多 100 ms epoll 等待。 |
+| `launch_lag_max_ms` | 实际发起连接比计划时间晚的最大值，反映加压调度延迟。 |
+| `start_call_max_ms` | 单路创建、配置、发起 SRT 连接所用时间的最大值。 |
+| `event_batch_max_ms` | 一批 epoll 事件处理时间的最大值。 |
+
+`--trace` 另存每路事件 CSV：`wall_time` 是本地时间，`elapsed_ms` 是测试启动后的毫秒数，`client` 是客户端序号，`event` 为 `connecting/connected/failed/finished`，`local_port` 是本机 UDP 端口，`srt_socket`/`srt_state` 是当时的 SRT 句柄和状态，`connect_ms` 是该路开始连接后的耗时，`launch_lag_ms` 是该路启动调度延迟，`loop_gap_max_ms` 是当时主循环最大间隔，`stream_id` 可在服务器 `sub#... started` 日志中检索，`detail` 是失败原因。无法取得本地端口时记为 `-1`；所有失败行也写到标准错误。
 
 `attempted`、`connect_fail`、`disconnect`、`loss`、`drop`、`p95_connect_ms` 按测试开始以来的数据计算；`connected`、`idle` 和各客户端码率统计只反映当前在线连接。在加连接阶段，新连接尚未收到数据时，最小码率可能为 0。`--ramp-ms` 是目标连接间隔；可用 `attempted` 与 `elapsed_s` 检查实际加压速度，若明显落后，不能用该次测试推算中继容量。程序结束时可能补写与上一行时间几乎相同的一行，其中 `rx_mbps=0` 不代表真实流量突然归零，可忽略该行。
 
 ## 如何判断结果
 
-无推流或未等到关键帧时，客户端可连接但没有数据。测试时同时观察 Dashboard 的 `queue_drops`、`egress_mbps`、`subscribers`，以及服务器与 PC 的 CPU、内存和网卡吞吐。仅凭客户端 CSV 不能定位瓶颈：应使用固定码率的输入流，再对照两端的资源与网络指标；必要时增加另一台压测机器，以区分单台 PC 和网络路径的限制。
+无推流或未等到关键帧时，客户端可连接但没有数据。测试时同时观察 Dashboard 的 `queue_drops`、`egress_mbps`、`subscribers`、每路 SRT 指标以及主机网卡/CPU/内存；服务器周期日志也保存相同的关键指标。仅凭客户端 CSV 不能定位瓶颈：应使用固定码率的输入流，再对照两端的资源与网络指标；必要时增加另一台压测机器，以区分单台 PC 和网络路径的限制。

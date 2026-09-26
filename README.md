@@ -51,7 +51,7 @@ cmake --build player/build --config Release
 .\player\build\Release\srt_player.exe 'srt://jfznbx.cn:9001?mode=caller&latency=20&streamid=cam1'
 ```
 
-也可不传 URL 直接运行，程序默认使用上面的公网地址；使用其他中继时替换 URL 主机名。播放状态写入仓库根目录的 `player_status.log`。
+也可不传 URL 直接运行，程序默认使用上面的公网地址；使用其他中继时替换 URL 主机名。播放状态写入当前工作目录的 `player_status.log`，每行有时间戳、连接标识、状态和错误码。每次重连生成新标识，并追加到 SRT Stream ID；可在中继的 `sub#... started` 日志中按该标识查找对应连接。
 
 ## 4. Dashboard
 
@@ -70,4 +70,4 @@ ffplay 'srt://<中继地址>:9001?mode=caller&latency=120'
 
 ## 6. PC 端拉流压测
 
-使用 [`load_test/README.md`](load_test/README.md) 中的无界面压测程序，按指定连接数逐步拉取 `9001` 端口的流，并输出每秒连接、吞吐、丢包和 RTT 统计。
+使用 [`load_test/README.md`](load_test/README.md) 中的无界面压测程序，按指定连接数逐步拉取 `9001` 端口的流，并输出每秒连接、吞吐、丢包、RTT 和事件循环延迟统计；加 `--trace` 保存每路连接事件。中继每个监测周期向 journald 写 `STAT` 和 `SUBSTAT`，含主机默认路由网卡速率、CPU、可用内存及每路 SRT 缓冲/重传指标；Dashboard 展示这些实时指标。查看：`journalctl -u srt-server -f`。

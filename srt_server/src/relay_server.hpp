@@ -443,10 +443,22 @@ private:
                     ? now_ms - status_.publisher_last_active_at_ms.load()
                     : -1;
             const uint64_t queue_drops = status_.subscriber_queue_drops.load();
+            const HostMetrics host = host_monitor_.sample();
 
             int subscriber_total = 0;
             int bad_subscribers = 0;
             std::vector<uint64_t> disconnect_subscribers;
+            struct SubSample {
+                uint64_t id;
+                std::string peer;
+                double sent_mb;
+                int queue_depth;
+                int latency_ms;
+                int64_t idle_ms;
+                std::string control;
+                SubscriberSession::SrtMetrics srt;
+            };
+            std::vector<SubSample> sub_samples;
             {
                 std::lock_guard<std::mutex> lk(sub_mu_);
                 for (auto& [id, sess] : subscribers_) {
@@ -462,6 +474,10 @@ private:
                     }
                     ++subscriber_total;
                     if (sess->bad_for_global()) ++bad_subscribers;
+                    sub_samples.push_back({id, sess->peer(), sess->sent_bytes() / 1048576.0,
+                                           sess->queue_depth(), sess->latency_ms(),
+                                           now_ms - sess->last_active_ms(),
+                                           sess->control_action_name(), sess->srt_metrics()});
                 }
 
                 for (uint64_t id : disconnect_subscribers) {
@@ -493,8 +509,26 @@ private:
                     << " subs=" << status_.subscriber_count.load()
                     << " disc=" << status_.ts_discontinuities.load()
                     << " drops=" << queue_drops
-                    << " bad_ratio=" << bad_subscriber_ratio;
-            //log_line("STAT", log_oss.str());
+                    << " bad_ratio=" << bad_subscriber_ratio
+                    << " nic=" << (host.nic.empty() ? "unknown" : host.nic)
+                    << " nic_rx=" << host.nic_rx_mbps << "Mbps"
+                    << " nic_tx=" << host.nic_tx_mbps << "Mbps"
+                    << " cpu=" << host.cpu_percent << "%"
+                    << " mem_avail=" << host.mem_available_mb << "MB"
+                    << " rss=" << host.process_rss_mb << "MB";
+            log_line("STAT", log_oss.str());
+            for (const auto& sub : sub_samples) {
+                std::ostringstream sub_log;
+                sub_log << std::fixed << std::setprecision(2)
+                        << "sub#" << sub.id << " peer=" << sub.peer
+                        << " q=" << sub.queue_depth << " idle_ms=" << sub.idle_ms
+                        << " sndbuf_pkts=" << sub.srt.send_buf_packets
+                        << " avail_sndbuf_bytes=" << sub.srt.avail_send_buf_bytes
+                        << " retrans=" << sub.srt.retrans_total
+                        << " snd_loss=" << sub.srt.send_loss_total
+                        << " rtt_ms=" << sub.srt.rtt_ms;
+                log_line("SUBSTAT", sub_log.str());
+            }
 
             if (cfg_.ws_port > 0 && ws_.client_count() > 0) {
                 std::ostringstream j;
@@ -514,6 +548,12 @@ private:
                   << "\"pub_idle_ms\":" << pub_idle_ms << ","
                   << "\"ws_clients\":" << ws_.client_count() << ","
                   << "\"bad_subscriber_ratio\":" << bad_subscriber_ratio << ","
+                  << "\"host_nic\":\"" << host.nic << "\","
+                  << "\"host_nic_rx_mbps\":" << host.nic_rx_mbps << ","
+                  << "\"host_nic_tx_mbps\":" << host.nic_tx_mbps << ","
+                  << "\"host_cpu_percent\":" << host.cpu_percent << ","
+                  << "\"host_mem_available_mb\":" << host.mem_available_mb << ","
+                  << "\"relay_rss_mb\":" << host.process_rss_mb << ","
                   << "\"global_state\":\"" << global_controller_.state_name() << "\","
                   << "\"global_action\":\"" << global_action_name(global_decision.action) << "\","
                   << "\"global_bitrate_kbps\":" << global_controller_.bitrate_kbps() << ","
@@ -533,20 +573,23 @@ private:
                 }
                 j << "],\"sub_list\":[";
                 {
-                    std::lock_guard<std::mutex> lk(sub_mu_);
-                    int idx = 0;
-                    for (auto& [id, sess] : subscribers_) {
+                    for (size_t idx = 0; idx < sub_samples.size(); ++idx) {
+                        const auto& sub = sub_samples[idx];
                         if (idx) j << ",";
                         j << "{"
-                          << "\"id\":" << id << ","
-                          << "\"peer\":\"" << sess->peer() << "\","
-                          << "\"sent_mb\":" << (sess->sent_bytes() / 1048576.0) << ","
-                          << "\"q\":" << sess->queue_depth() << ","
-                          << "\"latency_ms\":" << sess->latency_ms() << ","
-                          << "\"idle_ms\":" << (now_ms - sess->last_active_ms()) << ","
-                          << "\"ctrl\":\"" << sess->control_action_name() << "\""
+                          << "\"id\":" << sub.id << ","
+                          << "\"peer\":\"" << sub.peer << "\","
+                          << "\"sent_mb\":" << sub.sent_mb << ","
+                          << "\"q\":" << sub.queue_depth << ","
+                          << "\"latency_ms\":" << sub.latency_ms << ","
+                          << "\"idle_ms\":" << sub.idle_ms << ","
+                          << "\"ctrl\":\"" << sub.control << "\","
+                          << "\"srt_sndbuf_pkts\":" << sub.srt.send_buf_packets << ","
+                          << "\"srt_avail_sndbuf_bytes\":" << sub.srt.avail_send_buf_bytes << ","
+                          << "\"srt_retrans_total\":" << sub.srt.retrans_total << ","
+                          << "\"srt_send_loss_total\":" << sub.srt.send_loss_total << ","
+                          << "\"srt_rtt_ms\":" << sub.srt.rtt_ms
                           << "}";
-                        ++idx;
                     }
                 }
                 j << "]}";
@@ -557,6 +600,7 @@ private:
 
     Config       cfg_;
     StreamStatus status_;
+    HostMonitor host_monitor_;
     TsValidator  validator_;
     GlobalController global_controller_;
     PusherControlClient pusher_control_;
