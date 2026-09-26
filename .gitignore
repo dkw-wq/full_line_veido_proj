@@ -5,5 +5,7 @@ player/.vs/
 build/
 build-asan/
 player_status.log
+load_test/build/
+load_test/*.csv
 srt_server/build
 pusher/build

@@ -67,3 +67,7 @@ ffplay 'srt://<中继地址>:9001?mode=caller&latency=120'
 ```
 
 组件细节见 [`pusher/ReadMe.md`](pusher/ReadMe.md)、[`srt_server/ReadMe.md`](srt_server/ReadMe.md) 和 [`player/ReadMe.md`](player/ReadMe.md)。
+
+## 6. PC 端拉流压测
+
+使用 [`load_test/README.md`](load_test/README.md) 中的无界面压测程序，按指定连接数逐步拉取 `9001` 端口的流，并输出每秒连接、吞吐、丢包和 RTT 统计。
