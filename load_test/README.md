@@ -1,4 +1,4 @@
-# Windows SRT 拉流压测
+# SRT 拉流压测（Windows / Linux）
 
 单进程创建多个无界面的 SRT 拉流连接，逐步加压并按秒输出连接数、总接收码率、每个客户端码率分布、SRT 丢包/过期丢弃和平均 RTT。可用 `--csv` 保存相同的逐秒统计。程序只读取并丢弃流，不解码。
 
@@ -10,6 +10,16 @@ $vcpkg = 'E:\vcpkg'
 cmake -S load_test -B load_test/build -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_TOOLCHAIN_FILE=${vcpkg}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
 cmake --build load_test/build --config Release
 ```
+
+Linux 安装 SRT 开发库后编译，例如 Alibaba Cloud Linux 3：
+
+```bash
+dnf install -y srt-devel
+cmake -S load_test -B load_test/build -DCMAKE_BUILD_TYPE=Release
+cmake --build load_test/build -j2
+```
+
+Linux 可执行文件位于 `load_test/build/srt_load_test`，参数与 Windows 相同。
 
 先启动中继与一条持续推流（见根目录 README），再从本 PC 执行。压测记录统一放在 `load_test/results/`：
 

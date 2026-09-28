@@ -1,5 +1,12 @@
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 #include <srt/srt.h>
 
 #include <algorithm>
@@ -43,7 +50,7 @@ struct Options {
 
 void print_usage() {
     std::cout
-        << "SRT receiver load test (Windows)\n"
+        << "SRT receiver load test\n"
         << "  --host HOST                 relay hostname or IPv4 (default jfznbx.cn)\n"
         << "  --port N                    subscriber UDP port (default 9001)\n"
         << "  --clients N                 total connections to attempt (default 1)\n"
@@ -104,25 +111,33 @@ Options parse_options(int argc, char** argv) {
 class Runtime {
 public:
     Runtime() {
+#ifdef _WIN32
         WSADATA data{};
         if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
             throw std::runtime_error("WSAStartup failed");
         winsock_started_ = true;
+#endif
         if (srt_startup() != 0) {
+#ifdef _WIN32
             WSACleanup();
+#endif
             throw std::runtime_error("srt_startup failed");
         }
         srt_started_ = true;
     }
     ~Runtime() {
         if (srt_started_) srt_cleanup();
+#ifdef _WIN32
         if (winsock_started_) WSACleanup();
+#endif
     }
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
 
 private:
+#ifdef _WIN32
     bool winsock_started_ = false;
+#endif
     bool srt_started_ = false;
 };
 
@@ -318,7 +333,11 @@ private:
         const auto now = std::chrono::system_clock::now();
         const auto tt = std::chrono::system_clock::to_time_t(now);
         std::tm tm{};
+#ifdef _WIN32
         localtime_s(&tm, &tt);
+#else
+        localtime_r(&tt, &tm);
+#endif
         auto csv_text = [](const std::string& value) {
             std::string quoted = "\"";
             for (char ch : value) quoted += ch == '"' ? "\"\"" : std::string(1, ch);
@@ -377,9 +396,15 @@ private:
         c.phase = Phase::Connecting;
         c.started = now;
         c.slow = options_.slow_every > 0 && id % options_.slow_every == 0;
-        if (!options_.stream_id.empty())
-            c.stream_id = options_.stream_id + "~lt-" + std::to_string(GetCurrentProcessId()) +
+        if (!options_.stream_id.empty()) {
+#ifdef _WIN32
+            const auto process_id = GetCurrentProcessId();
+#else
+            const auto process_id = getpid();
+#endif
+            c.stream_id = options_.stream_id + "~lt-" + std::to_string(process_id) +
                           "-" + std::to_string(id);
+        }
         c.socket = srt_create_socket();
         if (c.socket == SRT_INVALID_SOCK) { close_client(c, "socket creation failed"); return; }
 
