@@ -11,3 +11,9 @@ load_test/results/*
 !load_test/results/.gitkeep
 srt_server/build
 pusher/build
+
+# 本地私密信息，禁止入库
+secrets/
+*.local.md
+.env
+.env.*
